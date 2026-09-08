@@ -3,7 +3,7 @@ import { validateSlotGraph } from '../cascade';
 import { fetchDeps } from '../reconcile';
 import { supersede } from '../temporal';
 import { recomputeNextMaterialDate } from '../scheduler';
-import { validateGroupPredicate, toSql, type Predicate } from '../predicate';
+import { validateGroupPredicate, parsePredicate, toSql, type Predicate } from '../predicate';
 import { drainMemoryQueue, transactionalQueue } from '../runtime';
 import { memoryQueue } from '../queue';
 import type { Clock } from '../clock';
@@ -173,10 +173,13 @@ export async function createRule(
     source: 'rule',
     effect: input.effect ?? 'grant',
     priority: input.priority ?? 0,
-    criteria: input.criteria,
+    // Parse before anything else touches it: `criteria` is untrusted JSON, and
+    // toSql compiles `field` into query text. See parsePredicate.
+    criteria: parsePredicate(input.criteria),
     subjectEmployeeId: null,
     createdAt: systemAt,
   };
+  const targetType = await slotTargetType(db, companyId, input.slotId);
   const candidates = await candidatesForRuleChange(db, companyId, null, rule, effectiveAt);
 
   await runTx(db, async (tx) => {
@@ -192,8 +195,10 @@ export async function createRule(
         source: 'rule',
         effect: rule.effect,
         priority: rule.priority,
-        criteria: JSON.stringify(input.criteria),
+        // Persist the parsed form: what is stored is exactly what was validated.
+        criteria: JSON.stringify(rule.criteria),
         subject_employee_id: null,
+        target_type: targetType,
         rule_created_at: systemAt,
         created_at: systemAt,
       },
@@ -213,6 +218,23 @@ export async function createRule(
   });
   if (queue) await drainMemoryQueue(db, clock, queue);
   return ruleId;
+}
+
+/**
+ * The slot decides the target type; migration 006's composite foreign keys then
+ * force the rule's target to agree with it. Resolving it here means a rule that
+ * names another company's slot fails with a sentence instead of a constraint
+ * violation, and it supplies the denormalised discriminator those keys need.
+ */
+async function slotTargetType(db: Db, companyId: string, slotId: string): Promise<string> {
+  const { rows } = await db.query<{ target_type: string }>(
+    `SELECT target_type FROM assignment_slots WHERE company_id = $1 AND id = $2`,
+    [companyId, slotId],
+  );
+  if (rows.length === 0) {
+    throw new Error(`slot ${slotId} does not belong to company ${companyId}`);
+  }
+  return rows[0].target_type;
 }
 
 export interface RulePatch {
@@ -248,12 +270,13 @@ export async function updateRule(
     const after: Rule = {
       ...before,
       name: patch.name ?? before.name,
-      criteria: patch.criteria ?? before.criteria,
+      criteria: patch.criteria === undefined ? before.criteria : parsePredicate(patch.criteria),
       priority: patch.priority ?? before.priority,
       targetId: patch.targetId ?? before.targetId,
       effect: patch.effect ?? before.effect,
     };
     const candidates = await candidatesForRuleChange(tx, companyId, before, after, effectiveAt);
+    const targetType = await slotTargetType(tx, companyId, after.slotId);
 
     await supersede(tx, {
       table: 'assignment_rules',
@@ -261,6 +284,7 @@ export async function updateRule(
       key: { rule_id: ruleId },
       payload: {
         slot_id: after.slotId,
+        target_type: targetType,
         target_id: after.targetId,
         name: after.name,
         source: after.source,
@@ -301,7 +325,8 @@ export async function createManualOverride(
   const systemAt = clock.now();
   const ruleId = crypto.randomUUID();
   const versionId = crypto.randomUUID();
-  const criteria = input.criteria ?? { op: 'always' };
+  const criteria: Predicate =
+    input.criteria === undefined ? { op: 'always' } : parsePredicate(input.criteria);
   const rule: Rule = {
     id: versionId,
     ruleId,
@@ -317,6 +342,7 @@ export async function createManualOverride(
     subjectEmployeeId: employeeId,
     createdAt: systemAt,
   };
+  const targetType = await slotTargetType(db, companyId, input.slotId);
   const candidates = await candidatesForRuleChange(db, companyId, null, rule, effectiveAt);
 
   await runTx(db, async (tx) => {
@@ -334,6 +360,7 @@ export async function createManualOverride(
         priority: rule.priority,
         criteria: JSON.stringify(criteria),
         subject_employee_id: employeeId,
+        target_type: targetType,
         rule_created_at: systemAt,
         created_at: systemAt,
       },
@@ -384,22 +411,25 @@ export async function createGroup(
   criteria: Predicate | undefined,
   clock: Clock,
 ): Promise<string> {
+  // Store the parsed form, so what is persisted is exactly what was validated.
+  let parsed: Predicate | undefined;
   if (kind === 'dynamic') {
     if (!criteria) throw new Error('Dynamic group requires criteria');
-    validateGroupPredicate(criteria);
-    toSql(criteria, clock.now(), []);
+    parsed = parsePredicate(criteria);
+    validateGroupPredicate(parsed);
+    toSql(parsed, clock.now(), []);
   }
   let groupId = '';
   await runTx(db, async (tx) => {
     const { rows } = await tx.query<{ id: string }>(
       `INSERT INTO groups (company_id, key, kind, criteria) VALUES ($1, $2, $3, $4) RETURNING id`,
-      [companyId, key, kind, criteria ? JSON.stringify(criteria) : null],
+      [companyId, key, kind, parsed ? JSON.stringify(parsed) : null],
     );
     groupId = rows[0].id;
     await tx.query(
       `INSERT INTO audit_events (company_id, actor_id, actor_kind, action, entity_type, entity_id, after)
        VALUES ($1, NULL, 'system', 'create', 'group', $2, $3::jsonb)`,
-      [companyId, groupId, JSON.stringify({ groupId, key, kind, criteria })],
+      [companyId, groupId, JSON.stringify({ groupId, key, kind, criteria: parsed ?? null })],
     );
   });
   return groupId;

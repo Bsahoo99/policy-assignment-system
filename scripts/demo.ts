@@ -12,12 +12,8 @@ import { updateEmploymentRecord } from '../src/api/writes';
 import type { Db } from '../src/db';
 import type { Clock } from '../src/clock';
 import { randomUUID } from 'crypto';
+import { schemaStatements } from '../src/schema-sql';
 
-const schemaSql = readFileSync(join(process.cwd(), 'db/schema.sql'), 'utf8');
-const effectMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/002_rule_effect.sql'), 'utf8');
-const versionMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/003_rule_version_key.sql'), 'utf8');
-const tiebreakMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/004_stable_tiebreak.sql'), 'utf8');
-const employmentTypeMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/005_employment_type_check.sql'), 'utf8');
 const seedSql = readFileSync(join(process.cwd(), 'db/seed.sql'), 'utf8');
 
 const COMPANY_ID = '11111111-1111-1111-1111-111111111111';
@@ -44,11 +40,7 @@ async function targetName(db: Db, companyId: string) {
 
 async function main() {
   const db = new PGlite({ extensions: { btree_gist } });
-  await db.exec(schemaSql);
-  await db.exec(effectMigrationSql);
-  await db.exec(versionMigrationSql);
-  await db.exec(tiebreakMigrationSql);
-  await db.exec(employmentTypeMigrationSql);
+  for (const sql of schemaStatements()) await db.exec(sql);
   await db.exec(seedSql);
 
   // Add a state-dependent payroll target + rule for the Jane journey.

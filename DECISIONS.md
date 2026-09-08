@@ -11,14 +11,24 @@ substitute an alternative.
 
 ## D1. Stack
 
-Next.js 15 (App Router) + TypeScript. Postgres. Drizzle ORM. pg-boss for the queue.
-Vitest + fast-check for tests. pglite for test-time Postgres. shadcn/ui + Tailwind.
+Next.js 15 (App Router) + TypeScript. Postgres, addressed through raw SQL behind a
+thin `Db` adapter. pg-boss for the queue. Vitest + fast-check for tests. pglite for
+test-time Postgres. shadcn/ui + Tailwind.
 
 Rationale: one language across resolver and UI means the predicate types are shared
 between the rule builder and the engine, which is itself a developer-experience
-argument. Drizzle over Prisma specifically because this system needs raw `tstzrange`,
-GiST exclusion constraints, and dynamically generated `WHERE` clauses; Prisma fights
-all three.
+argument.
+
+**On the ORM.** An earlier draft of this decision chose Drizzle over Prisma, on the
+grounds that this system needs raw `tstzrange`, GiST exclusion constraints, and
+dynamically generated `WHERE` clauses, all of which Prisma fights. The argument was
+right and it kept going: those three requirements are most of the data layer, and
+every query here ended up being hand-written SQL anyway. Drizzle was never imported.
+The dependency has been removed rather than left in the manifest describing a system
+that was not built. The cost is that there is no typed query builder and column
+names are strings in SQL text; the mitigation is that the `Db` adapter is small and
+`toSql` is the only place identifiers are ever assembled (see migration 006 and
+`parsePredicate`).
 
 ## D2. Two time axes, not one
 

@@ -1,28 +1,21 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { PGlite } from '@electric-sql/pglite';
 import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist';
-import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { reconcileEmployee } from '../src/reconcile';
 import { FixedClock } from '../src/clock';
 import type { Db } from '../src/db';
 import type { Predicate } from '../src/predicate';
+import { schemaStatements } from '../src/schema-sql';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const schemaSql = readFileSync(join(__dirname, '../db/schema.sql'), 'utf8');
-const effectMigrationSql = readFileSync(join(__dirname, '../db/migrations/002_rule_effect.sql'), 'utf8');
-const versionMigrationSql = readFileSync(join(__dirname, '../db/migrations/003_rule_version_key.sql'), 'utf8');
-const tiebreakMigrationSql = readFileSync(join(__dirname, '../db/migrations/004_stable_tiebreak.sql'), 'utf8');
 
 let db: PGlite;
 
 beforeAll(async () => {
   db = new PGlite({ extensions: { btree_gist } });
-  await db.exec(schemaSql);
-  await db.exec(effectMigrationSql);
-  await db.exec(versionMigrationSql);
-  await db.exec(tiebreakMigrationSql);
+  for (const sql of schemaStatements(join(__dirname, '..'))) await db.exec(sql);
 });
 
 afterAll(async () => {

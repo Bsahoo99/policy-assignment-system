@@ -5,6 +5,7 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 import { PgBoss } from 'pg-boss';
 import { SystemClock } from './clock';
+import { schemaStatements } from './schema-sql';
 import { createQueue, memoryQueue } from './queue';
 import { reconcileEmployee } from './reconcile';
 import { computeEmployeeMaterialDates, dispatchDueMaterialDates, dispatchAllDueMaterialDates, upsertMaterialDates } from './scheduler';
@@ -101,6 +102,19 @@ async function applyMissingMigrations(pglite: PGlite): Promise<void> {
   // 005 is self-guarding (ADD CONSTRAINT ... IF NOT EXISTS equivalent via
   // pg_constraint), so it is safe to run on every boot.
   await pglite.exec(readFileSync(join(process.cwd(), 'db/migrations/005_employment_type_check.sql'), 'utf8'));
+
+  // 006 adds assignment_rules.target_type and the composite tenancy keys. Its
+  // ADD CONSTRAINT statements are not idempotent, so probe before applying.
+  const { rows: tt } = await pglite.query<{ column_name: string }>(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_name = 'assignment_rules' AND column_name = 'target_type'`,
+  );
+  if (tt.length === 0) {
+    await pglite.exec(
+      readFileSync(join(process.cwd(), 'db/migrations/006_tenant_and_target_integrity.sql'), 'utf8'),
+    );
+  }
 }
 
 async function initDb(): Promise<Db> {
@@ -111,11 +125,7 @@ async function initDb(): Promise<Db> {
   await pglite.waitReady;
   const { rows } = await pglite.query<{ t: string | null }>(`SELECT to_regclass('companies') AS t`);
   if (!rows[0].t) {
-    await pglite.exec(readFileSync(join(process.cwd(), 'db/schema.sql'), 'utf8'));
-    await pglite.exec(readFileSync(join(process.cwd(), 'db/migrations/002_rule_effect.sql'), 'utf8'));
-    await pglite.exec(readFileSync(join(process.cwd(), 'db/migrations/003_rule_version_key.sql'), 'utf8'));
-    await pglite.exec(readFileSync(join(process.cwd(), 'db/migrations/004_stable_tiebreak.sql'), 'utf8'));
-    await pglite.exec(readFileSync(join(process.cwd(), 'db/migrations/005_employment_type_check.sql'), 'utf8'));
+    for (const sql of schemaStatements()) await pglite.exec(sql);
   } else {
     await applyMissingMigrations(pglite);
   }

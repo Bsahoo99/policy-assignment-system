@@ -111,6 +111,8 @@ mention.
 
 ## Setup
 
+Requires **Node >= 22.12** (pg-boss).
+
 ```bash
 npm install
 ```
@@ -153,7 +155,7 @@ npm run dev      # third terminal
 | Command | What it does |
 | --- | --- |
 | `npm run demo` | End-to-end scenario on a fresh in-memory database. **The fastest way to see the system work.** |
-| `npm test` | 112 tests across 14 files, including `fast-check` property tests |
+| `npm test` | 124 tests across 15 files, including `fast-check` property tests |
 | `npm run dev` | Admin UI — employees, rules, groups, audit |
 | `npm run worker` | pg-boss worker (real Postgres only) |
 | `npm run build` | Production build |

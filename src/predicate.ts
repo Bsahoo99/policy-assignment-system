@@ -175,6 +175,25 @@ export interface SqlFragment {
  * fail `not(eq)`, matching three-valued SQL logic to the JS `===` semantics
  * above. This is the single most common place the two compilers diverge.
  */
+/**
+ * Scalar fields resolve to column text through this map and never through
+ * interpolation. Even if an unparsed predicate reached `toSql`, an unknown
+ * field would raise here rather than become SQL.
+ */
+const COLUMN: Record<ScalarField, string> = {
+  department: 'e.department',
+  location_state: 'e.location_state',
+  location_country: 'e.location_country',
+  employment_type: 'e.employment_type',
+  pay_type: 'e.pay_type',
+};
+
+function column(field: ScalarField): string {
+  const c = Object.prototype.hasOwnProperty.call(COLUMN, field) ? COLUMN[field] : undefined;
+  if (!c) throw new PredicateValidationError(`unknown field ${JSON.stringify(field)}`, 'field');
+  return c;
+}
+
 export function toSql(p: Predicate, asOf: Date, params: unknown[] = []): SqlFragment {
   switch (p.op) {
     case 'always':
@@ -182,12 +201,12 @@ export function toSql(p: Predicate, asOf: Date, params: unknown[] = []): SqlFrag
 
     case 'eq':
       params.push(p.value);
-      return { text: `(e.${p.field} = $${params.length})`, params };
+      return { text: `(${column(p.field)} = $${params.length})`, params };
 
     case 'in': {
       if (p.values.length === 0) return { text: 'FALSE', params };
       params.push(p.values);
-      return { text: `(e.${p.field} = ANY($${params.length}))`, params };
+      return { text: `(${column(p.field)} = ANY($${params.length}))`, params };
     }
 
     case 'gte_tenure': {
@@ -261,6 +280,140 @@ function earliest(dates: (Date | null)[]): Date | null {
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// Runtime validation
+//
+// `Predicate` is a compile-time type. Criteria arrive as JSON on an HTTP body,
+// where the type system is not present, and `toSql` places `field` into the
+// query text as an *identifier*. Parameterising values does not protect an
+// identifier, so a predicate that has not been through `parsePredicate` must
+// never reach `toSql`. Every write and preview path parses first.
+// ---------------------------------------------------------------------------
+
+export class PredicateValidationError extends Error {
+  readonly path: string;
+  constructor(message: string, path: string) {
+    super(`${message} (at ${path || 'criteria'})`);
+    this.name = 'PredicateValidationError';
+    this.path = path;
+  }
+}
+
+const MAX_NODES = 200;
+const MAX_DEPTH = 20;
+const MAX_STRING = 200;
+const MAX_IN_VALUES = 500;
+const MAX_TENURE_YEARS = 200;
+/** Group keys reach SQL as a parameter, but keep them boring anyway. */
+const GROUP_KEY = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * Parse untrusted JSON into a Predicate, or throw. Bounds tree size and depth so
+ * a hostile body cannot exhaust the compiler, and allowlists every field and
+ * operator rather than trusting the declared type.
+ */
+export function parsePredicate(input: unknown): Predicate {
+  let nodes = 0;
+
+  const str = (v: unknown, path: string, what: string): string => {
+    if (typeof v !== 'string') throw new PredicateValidationError(`${what} must be a string`, path);
+    if (v.length === 0) throw new PredicateValidationError(`${what} must not be empty`, path);
+    if (v.length > MAX_STRING) {
+      throw new PredicateValidationError(`${what} exceeds ${MAX_STRING} characters`, path);
+    }
+    return v;
+  };
+
+  const scalarField = (v: unknown, path: string): ScalarField => {
+    const f = str(v, path, 'field');
+    if (!(SCALAR_FIELDS as string[]).includes(f)) {
+      throw new PredicateValidationError(
+        `unknown field ${JSON.stringify(f)}; expected one of ${SCALAR_FIELDS.join(', ')}`,
+        path,
+      );
+    }
+    return f as ScalarField;
+  };
+
+  const parse = (v: unknown, path: string, depth: number): Predicate => {
+    nodes += 1;
+    if (nodes > MAX_NODES) {
+      throw new PredicateValidationError(`predicate has more than ${MAX_NODES} nodes`, path);
+    }
+    if (depth > MAX_DEPTH) {
+      throw new PredicateValidationError(`predicate nested deeper than ${MAX_DEPTH}`, path);
+    }
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      throw new PredicateValidationError('expected an object', path);
+    }
+    const n = v as Record<string, unknown>;
+
+    switch (n.op) {
+      case 'always':
+        return { op: 'always' };
+      case 'is_manager':
+        return { op: 'is_manager' };
+      case 'eq':
+        return {
+          op: 'eq',
+          field: scalarField(n.field, `${path}.field`),
+          value: str(n.value, `${path}.value`, 'value'),
+        };
+      case 'in': {
+        if (!Array.isArray(n.values)) {
+          throw new PredicateValidationError('values must be an array', `${path}.values`);
+        }
+        if (n.values.length > MAX_IN_VALUES) {
+          throw new PredicateValidationError(
+            `values exceeds ${MAX_IN_VALUES} entries`,
+            `${path}.values`,
+          );
+        }
+        return {
+          op: 'in',
+          field: scalarField(n.field, `${path}.field`),
+          values: n.values.map((x, i) => str(x, `${path}.values[${i}]`, 'value')),
+        };
+      }
+      case 'gte_tenure': {
+        const y = n.years;
+        if (typeof y !== 'number' || !Number.isInteger(y) || y < 0 || y > MAX_TENURE_YEARS) {
+          throw new PredicateValidationError(
+            `years must be a whole number between 0 and ${MAX_TENURE_YEARS}`,
+            `${path}.years`,
+          );
+        }
+        return { op: 'gte_tenure', years: y };
+      }
+      case 'in_group': {
+        const g = str(n.group, `${path}.group`, 'group');
+        if (!GROUP_KEY.test(g)) {
+          throw new PredicateValidationError(
+            'group key must be alphanumeric, with - or _',
+            `${path}.group`,
+          );
+        }
+        return { op: 'in_group', group: g };
+      }
+      case 'and':
+      case 'or': {
+        if (!Array.isArray(n.children)) {
+          throw new PredicateValidationError('children must be an array', `${path}.children`);
+        }
+        const children = n.children.map((c, i) => parse(c, `${path}.children[${i}]`, depth + 1));
+        return n.op === 'and' ? { op: 'and', children } : { op: 'or', children };
+      }
+      case 'not':
+        return { op: 'not', child: parse(n.child, `${path}.child`, depth + 1) };
+      default:
+        throw new PredicateValidationError(`unknown op ${JSON.stringify(n.op)}`, path);
+    }
+  };
+
+  return parse(input, '', 0);
+}
 
 /**
  * Dynamic groups may not reference groups. Prohibiting the node outright is

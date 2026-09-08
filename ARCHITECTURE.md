@@ -43,7 +43,11 @@ flowchart LR
 Everything resolves through one loop:
 
 1. **Facts** live in bi-temporal tables — `employment_records`, `group_memberships`,
-   `assignment_rules`. Each carries `valid` (when it was true in the world) and
+   `assignment_rules`, and `resolved_assignments`. Configuration does not:
+   slots, slot dependencies, targets and dynamic-group *definitions* are read
+   at current knowledge only, so editing a group definition rewrites history's
+   interpretation rather than versioning it. That boundary is a real gap, not a
+   deliberate simplification. Each carries `valid` (when it was true in the world) and
    `system` (when we believed it). There is exactly one mutation, `supersede()`:
    close the affected rows' system ranges, reinsert any valid-range remnants the
    new assertion doesn't cover, insert the new fact. `valid` is never edited.
@@ -362,6 +366,62 @@ Stated plainly rather than discovered:
   daemon for a live Postgres run.
 - **Browser journey verified by HTTP smoke and manual click-through**, not an
   automated browser suite.
+
+### Known convergence defects
+
+An independent review reproduced these against this commit. They are listed with
+their reproductions rather than left to be discovered, because each one narrows a
+guarantee stated elsewhere in this document.
+
+- **Candidate selection conflates the two clocks.** `candidatesForRuleChange`
+  passes the effective date as the system time, so a rule written today for a
+  past date selects employees using *what was known then* rather than what is
+  known now. A department correction learned after the rule's effective date
+  therefore leaves the employee out of the candidate set.
+- **A new rule schedules only employees who already match.** Creating a
+  two-year tenure rule for a one-year employee writes no
+  `employee_next_material_date` row and queues no job, so nothing fires at that
+  employee's anniversary. Scheduling must consider employees who will match
+  later, not only those who match now.
+- **Segmentation collects one tenure boundary per rule.** A predicate with both
+  a lower and an upper tenure bound (`tenure >= 1 AND NOT tenure >= 2`)
+  publishes an open-ended segment where it should close at the second
+  threshold. Boundaries need to be discovered per segment, not once per rule.
+- **Manager cascades lose their effective dates.** Dependent managers are
+  enqueued at the originating job's effective date, and boundary collection
+  sees a manager's own assignments but not inbound reporting changes. After a
+  future-dated transfer the old manager keeps manager-only training and the new
+  one never gains it. A topological sort over slots cannot express a dependency
+  that runs between employees.
+- **A partial record edit replaces the whole future timeline.** `PATCH` builds
+  a full snapshot from the record in force at the effective date and supersedes
+  everything after it, so patching location in April silently discards a
+  department transfer already scheduled for June. The correction semantics need
+  to be stated and then either preserved field-wise or previewed.
+- **A second manual override can succeed without taking effect.** The override
+  form always writes priority 100, and the comparator prefers the older logical
+  rule on a tie, so a later override loses to an earlier one. Replacement needs
+  to be an explicit action rather than another insert.
+- **Stored provenance can go stale.** Reconciliation compares the winning
+  *logical* rule and coverage, not the winning rule *version*, so editing a rule
+  without changing its target leaves the previous version id and its explain
+  trace attached to the assignment.
+- **Preview omits the dependency closure.** Rule preview resolves before and
+  after with the same stored `direct_report_count`, so changing a report's
+  manager previews only that change and not the manager-training consequences
+  the save will produce. Sharing the leaf resolver is necessary for preview and
+  save to agree; it is not sufficient.
+- **SQL tenure comparison is session-timezone dependent.** `date + interval`
+  yields a timestamp without time zone, compared against a `timestamptz`
+  boundary that JavaScript builds at UTC midnight. The property test pins the
+  session to UTC and so does not cover the discrepancy.
+
+The first four are the substantive ones: they are all instances of the same
+mistake, which is deciding *which* employees and *which* time ranges are
+affected using information that is narrower than what the system already knows.
+The engine's per-employee resolution is not implicated — resolution given a
+correct state and a correct instant is exercised by the suite. What is wrong is
+the selection of states and instants around it.
 
 ## Deliberately not built
 

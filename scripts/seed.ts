@@ -5,21 +5,13 @@ import { SystemClock } from '../src/clock';
 import { memoryQueue } from '../src/queue';
 import { reconcileEmployee } from '../src/reconcile';
 import type { Db } from '../src/db';
+import { schemaStatements } from '../src/schema-sql';
 
-const schemaSql = readFileSync(join(process.cwd(), 'db/schema.sql'), 'utf8');
-const effectMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/002_rule_effect.sql'), 'utf8');
-const versionMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/003_rule_version_key.sql'), 'utf8');
-const tiebreakMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/004_stable_tiebreak.sql'), 'utf8');
-const employmentTypeMigrationSql = readFileSync(join(process.cwd(), 'db/migrations/005_employment_type_check.sql'), 'utf8');
 
 async function ensureSchema(db: Awaited<ReturnType<typeof getDb>>) {
   const { rows } = await db.query<{ t: string | null }>(`SELECT to_regclass('companies') AS t`);
   if (!rows[0].t) {
-    await db.exec(schemaSql);
-    await db.exec(effectMigrationSql);
-    await db.exec(versionMigrationSql);
-    await db.exec(tiebreakMigrationSql);
-    await db.exec(employmentTypeMigrationSql);
+  for (const sql of schemaStatements()) await db.exec(sql);
   }
 }
 

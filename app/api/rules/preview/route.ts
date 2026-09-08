@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDb, getClock } from '../../../../src/runtime';
 import { previewRuleImpact } from '../../../../src/preview';
 import type { Rule } from '../../../../src/types';
-import type { Predicate } from '../../../../src/predicate';
+import { parsePredicate, type Predicate } from '../../../../src/predicate';
 
 interface RuleRow {
   id: string;
@@ -46,6 +46,9 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { company_id, rule_id, criteria, slot_id, target_id, effect, priority, name, effective_at, system_at } = body;
+    // Preview compiles this straight to SQL, so it needs the same gate as a write.
+    const parsedCriteria: Predicate | undefined =
+      criteria === undefined || criteria === null ? undefined : parsePredicate(criteria);
     const db = await getDb();
     const effectiveAt = new Date(effective_at);
     const systemAt = system_at ? new Date(system_at) : getClock().now();
@@ -64,7 +67,7 @@ export async function POST(req: NextRequest) {
     const after: Rule = before
       ? {
           ...before,
-          criteria: criteria ?? before.criteria,
+          criteria: parsedCriteria ?? before.criteria,
           slotId: slot_id ?? before.slotId,
           targetId: target_id ?? before.targetId,
           effect: effect ?? before.effect,
@@ -82,7 +85,7 @@ export async function POST(req: NextRequest) {
           source: 'rule',
           effect: effect ?? 'grant',
           priority: priority ?? 0,
-          criteria: criteria ?? { op: 'always' },
+          criteria: parsedCriteria ?? { op: 'always' },
           subjectEmployeeId: null,
           createdAt: systemAt,
         };

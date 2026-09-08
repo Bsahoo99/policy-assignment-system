@@ -36,7 +36,10 @@ embedded Postgres. It walks one employee through the hardest case in the brief:
 
 That last step is the point. Payroll ran in August against a belief we now know
 was wrong. The system reproduces **both** answers — what we believed then, and
-what we know now — because every fact carries two time axes rather than one.
+what we know now — because the facts that drive resolution (employment records,
+rules, group memberships, and the resolved assignments themselves) each carry two
+time axes rather than one. Configuration — slots, targets, group *definitions* —
+does not; `ARCHITECTURE.md` states that boundary and why it is a gap.
 
 ---
 
@@ -155,7 +158,7 @@ npm run dev      # third terminal
 | Command | What it does |
 | --- | --- |
 | `npm run demo` | End-to-end scenario on a fresh in-memory database. **The fastest way to see the system work.** |
-| `npm test` | 124 tests across 15 files, including `fast-check` property tests |
+| `npm test` | 127 tests across 15 files, including `fast-check` property tests |
 | `npm run dev` | Admin UI — employees, rules, groups, audit |
 | `npm run worker` | pg-boss worker (real Postgres only) |
 | `npm run build` | Production build |

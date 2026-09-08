@@ -130,9 +130,15 @@ flowchart LR
 ```
 
 Reconciliation is **level-triggered**: the worker rebuilds desired state from
-source facts and diffs it, rather than applying event deltas. Duplicated,
-out-of-order, and replayed jobs are therefore all harmless — an event means
-"this employee is dirty", nothing more.
+source facts and diffs it, rather than applying event deltas. That is what lets
+an event mean only "this employee is dirty" — the *recompute* does not depend on
+which event arrived, or in what order, or how many times.
+
+That is a narrower property than it first sounds, and the difference is load
+bearing. Level-triggered recompute over the wrong *time range* is still the wrong
+answer, and the boundary planning around it has reproduced defects: a job can
+still publish an incorrect segment (see **Known convergence defects**). The
+guarantee holds for the recompute. It does not yet hold for the plan.
 
 When a rule changes we do not sweep the company. The candidate set is the union
 of employees matching the **old** criteria, employees matching the **new**
@@ -360,6 +366,12 @@ Stated plainly rather than discovered:
 - **Performance at scale is unverified.** The suite exercises the seeded
   population (3 employees); `buildEmployeeStates` is batched and candidate
   selection uses compiled SQL, but no population-scale benchmark exists.
+- **The Docker path was broken by migration 006 and is fixed but still not
+  run here.** The entrypoint was a static list of `\i` lines; adding 006 without
+  updating it meant the documented Postgres setup built a schema whose first rule
+  write failed with 42703. It now iterates the migrations directory, and a test
+  asserts no entrypoint file names an individual migration. The fix is verified by
+  schema sequence, not by a live container — see below.
 - **Real Postgres/worker integration is exercised by code path, not by a
   running deployment** — the pg-boss worker and `withTransaction` adapters are
   written and unit-tested against PGlite, but this environment had no Docker

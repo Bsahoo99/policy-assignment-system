@@ -4,10 +4,13 @@ import { join } from 'path';
 /**
  * The base schema followed by every migration, in filename order.
  *
- * Six call sites used to hardcode this list, and they had already drifted: the
- * test helpers stopped at 004, so the suite ran against a schema missing 005's
- * employment_type check. Reading the directory removes the class of bug instead
- * of fixing one instance -- adding a migration file is now sufficient.
+ * Seven call sites used to hardcode this list, and they had already drifted: the
+ * test helpers stopped at 004, and the Docker entrypoint stopped at 005 while 006
+ * existed -- so the documented Postgres path built a schema whose first rule write
+ * failed. (The test-helper drift was harmless in itself: db/schema.sql already
+ * declares the employment_type check that 005 backfills for older databases.
+ * Harmless drift is still drift.) Reading the directory removes the class of bug
+ * instead of fixing instances -- adding a migration file is now sufficient.
  */
 export function schemaStatements(root: string = process.cwd()): string[] {
   const migrationsDir = join(root, 'db/migrations');

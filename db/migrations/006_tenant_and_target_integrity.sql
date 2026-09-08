@@ -93,9 +93,12 @@ ALTER TABLE resolved_assignments
 -- Derive the discriminator instead of requiring every INSERT to restate it.
 --
 -- This is a denormalisation maintained by the database, not business logic: the
--- value is a copy of the slot's target_type and has no other source. Making the
--- database fill it means no write path -- application, seed, fixture, or a future
--- one nobody has written yet -- can supply a value that disagrees with the slot.
+-- value is a copy of the slot's target_type and has no other source.
+--
+-- The trigger and the foreign keys do different halves of the job: the trigger
+-- fills the discriminator when a caller omits it, so no write path has to know
+-- the column exists; the composite foreign keys above reject a caller that
+-- supplies one disagreeing with the slot. Neither alone is the guarantee.
 -- If the slot does not exist in this company the column stays NULL and the NOT
 -- NULL constraint rejects the row, which is the correct outcome.
 CREATE OR REPLACE FUNCTION assignment_rules_fill_target_type() RETURNS trigger AS $fn$

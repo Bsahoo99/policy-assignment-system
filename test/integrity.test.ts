@@ -1,9 +1,14 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
+import { fileURLToPath } from 'url';
+import { dirname } from 'path';
 import { PGlite } from '@electric-sql/pglite';
 import { parsePredicate, toSql, PredicateValidationError } from '../src/predicate';
 import { createRule } from '../src/api/writes';
 import { FixedClock } from '../src/clock';
 import type { Db } from '../src/db';
+import { schemaStatements } from '../src/schema-sql';
 import {
   createTestDb,
   insertCompany,
@@ -88,7 +93,10 @@ describe('tenant and target-type integrity', () => {
     const appTargetA = await insertAssignmentTarget(db, companyA, 'app', 'A Slack');
     const appTargetB = await insertAssignmentTarget(db, companyB, 'app', 'B Slack');
     const payTargetA = await insertAssignmentTarget(db, companyA, 'pay_schedule', 'A Monthly');
-    return { pg, db, companyA, companyB, paySlotA, appTargetA, appTargetB, payTargetA };
+    // Same type as the slot, but the wrong company: isolates the tenancy check
+    // from the target-type check, which the appTargetB case conflates.
+    const payTargetB = await insertAssignmentTarget(db, companyB, 'pay_schedule', 'B Monthly');
+    return { pg, db, companyA, companyB, paySlotA, appTargetA, appTargetB, payTargetA, payTargetB };
   }
 
   const clock = new FixedClock(new Date('2026-01-01T00:00:00Z'));
@@ -101,6 +109,20 @@ describe('tenant and target-type integrity', () => {
         f.db,
         f.companyA,
         { name: 'cross tenant', slotId: f.paySlotA, targetId: f.appTargetB, criteria: { op: 'always' } },
+        at,
+        clock,
+      ),
+    ).rejects.toThrow();
+    await f.pg.close();
+  });
+
+  it('test_rule_naming_another_companys_target_of_the_right_type_is_rejected', async () => {
+    const f = await fixture();
+    await expect(
+      createRule(
+        f.db,
+        f.companyA,
+        { name: 'foreign same-type', slotId: f.paySlotA, targetId: f.payTargetB, criteria: { op: 'always' } },
         at,
         clock,
       ),
@@ -148,5 +170,41 @@ describe('tenant and target-type integrity', () => {
     );
     expect(id).toBeTruthy();
     await f.pg.close();
+  });
+});
+
+const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * Every startup path must apply every migration. The Docker entrypoint was a
+ * static list of `\i` lines and it drifted: 006 was added, the list was not, and
+ * the documented Postgres setup built a schema whose first rule write failed with
+ * 42703. The TypeScript callers were centralised on a directory read at the same
+ * time and this one was missed because it is psql, not TypeScript.
+ */
+describe('migration delivery', () => {
+  it('test_docker_entrypoint_globs_migrations_rather_than_listing_them', () => {
+    const entrypointDir = join(repoRoot, 'db/docker-entrypoint-initdb.d');
+    const files = readdirSync(entrypointDir);
+    const contents = files.map((f) => readFileSync(join(entrypointDir, f), 'utf8')).join('\n');
+
+    // No entrypoint file may name an individual migration; that is what drifts.
+    for (const migration of readdirSync(join(repoRoot, 'db/migrations'))) {
+      expect(contents).not.toContain(migration);
+    }
+    // It must instead iterate the directory.
+    expect(contents).toMatch(/migrations\/\*\.sql/);
+  });
+
+  it('test_schema_statements_are_the_schema_then_every_migration_in_order', () => {
+    const dir = join(repoRoot, 'db/migrations');
+    const expected = [
+      readFileSync(join(repoRoot, 'db/schema.sql'), 'utf8'),
+      ...readdirSync(dir)
+        .filter((f) => f.endsWith('.sql'))
+        .sort()
+        .map((f) => readFileSync(join(dir, f), 'utf8')),
+    ];
+    expect(schemaStatements(repoRoot)).toEqual(expected);
   });
 });

@@ -117,9 +117,44 @@ async function applyMissingMigrations(pglite: PGlite): Promise<void> {
   }
 }
 
+/**
+ * The Postgres path does not run migrations: the Docker entrypoint applies them
+ * once, against an empty data volume. A volume created before a migration landed
+ * therefore keeps the old schema, and the failure surfaces much later as a bare
+ * `column ... does not exist` on the first write. Say it at startup, with the
+ * command that fixes it.
+ *
+ * Scoped deliberately: a database with no `assignment_rules` table at all is not
+ * stale, it is empty, and the entrypoint or seed will build it.
+ */
+async function assertSchemaCurrent(db: Db): Promise<void> {
+  const { rows: table } = await db.query<{ t: string | null }>(
+    `SELECT to_regclass('assignment_rules') AS t`,
+  );
+  if (!table[0]?.t) return;
+
+  const { rows: col } = await db.query<{ column_name: string }>(
+    `SELECT column_name
+       FROM information_schema.columns
+      WHERE table_name = 'assignment_rules' AND column_name = 'target_type'`,
+  );
+  if (col.length === 0) {
+    throw new Error(
+      [
+        'Postgres schema is out of date: assignment_rules.target_type is missing (migration 006).',
+        'The Docker entrypoint only initialises an empty volume, so an existing one keeps its old schema.',
+        'Recreate it:',
+        '  docker compose down -v && docker compose up -d postgres && npm run seed',
+      ].join('\n'),
+    );
+  }
+}
+
 async function initDb(): Promise<Db> {
   if (process.env.DATABASE_URL) {
-    return poolDb(new Pool({ connectionString: process.env.DATABASE_URL }));
+    const db = poolDb(new Pool({ connectionString: process.env.DATABASE_URL }));
+    await assertSchemaCurrent(db);
+    return db;
   }
   const pglite = new PGlite({ dataDir: process.env.PGLITE_DATA_DIR ?? './.pglite', extensions: { btree_gist } });
   await pglite.waitReady;

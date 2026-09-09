@@ -180,7 +180,7 @@ export async function createRule(
     createdAt: systemAt,
   };
   const targetType = await slotTargetType(db, companyId, input.slotId);
-  const candidates = await candidatesForRuleChange(db, companyId, null, rule, effectiveAt);
+  const candidates = await candidatesForRuleChange(db, companyId, null, rule, effectiveAt, systemAt);
 
   await runTx(db, async (tx) => {
     const q = await txQueue(tx, db, queue);
@@ -275,7 +275,7 @@ export async function updateRule(
       targetId: patch.targetId ?? before.targetId,
       effect: patch.effect ?? before.effect,
     };
-    const candidates = await candidatesForRuleChange(tx, companyId, before, after, effectiveAt);
+    const candidates = await candidatesForRuleChange(tx, companyId, before, after, effectiveAt, systemAt);
     const targetType = await slotTargetType(tx, companyId, after.slotId);
 
     await supersede(tx, {
@@ -343,7 +343,7 @@ export async function createManualOverride(
     createdAt: systemAt,
   };
   const targetType = await slotTargetType(db, companyId, input.slotId);
-  const candidates = await candidatesForRuleChange(db, companyId, null, rule, effectiveAt);
+  const candidates = await candidatesForRuleChange(db, companyId, null, rule, effectiveAt, systemAt);
 
   await runTx(db, async (tx) => {
     const q = await txQueue(tx, db, queue);

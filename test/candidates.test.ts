@@ -51,6 +51,57 @@ function rule(id: string, slotId: string, targetId: string, criteria: Predicate,
 }
 
 describe('candidatesForRuleChange', () => {
+  /**
+   * Retroactive corrections are the reason this system has two time axes, so
+   * candidate selection must read them independently. A rule written today for a
+   * past effective date has to select employees using what we know *now*, not
+   * what we believed on that date -- otherwise a correction learned after the
+   * fact leaves exactly the affected employee out of the reconciliation set.
+   *
+   * Timeline: the employee was recorded as Engineering. In August we learned they
+   * had actually moved to Sales in May. In September we write a Sales rule
+   * effective June. Current knowledge says they were Sales in June, so they are a
+   * candidate; June's knowledge said Engineering, and reading that is the bug.
+   */
+  it('test_backdated_rule_selects_employees_using_current_not_historical_knowledge', async () => {
+    const companyId = await insertCompany(db, 'twoclock');
+    const employeeId = await insertEmployee(db, companyId, 'corrected@example.com');
+
+    // What supersede() leaves behind after an August correction of a May move.
+    const rows: [string, string, string | null, string, string | null][] = [
+      ['Engineering', '2024-01-01T00:00:00Z', null, '2024-01-01T00:00:00Z', '2026-08-01T00:00:00Z'],
+      ['Engineering', '2024-01-01T00:00:00Z', '2026-05-01T00:00:00Z', '2026-08-01T00:00:00Z', null],
+      ['Sales', '2026-05-01T00:00:00Z', null, '2026-08-01T00:00:00Z', null],
+    ];
+    for (const [dept, vFrom, vTo, sFrom, sTo] of rows) {
+      await db.query(
+        `INSERT INTO employment_records
+           (company_id, employee_id, department, location_state, location_country,
+            employment_type, pay_type, tenure_start_date, valid, system)
+         VALUES ($1, $2, $3, 'CA', 'US', 'w2_employee', 'salary', '2024-01-01',
+                 tstzrange($4::timestamptz, $5::timestamptz),
+                 tstzrange($6::timestamptz, $7::timestamptz))`,
+        [companyId, employeeId, dept, vFrom, vTo, sFrom, sTo],
+      );
+    }
+
+    const slotId = await insertSlot(db, companyId, 'vacation', 'exactly_one', 'policy');
+    const targetId = await insertAssignmentTarget(db, companyId, 'policy', 'Sales Vacation');
+    const ruleId = '00000000-0000-0000-0000-0000000000d1';
+    const after = rule(ruleId, slotId, targetId, { op: 'eq', field: 'department', value: 'Sales' });
+
+    const result = await candidatesForRuleChange(
+      db as unknown as Db,
+      companyId,
+      null,
+      after,
+      new Date('2026-06-01T00:00:00Z'), // effective: in the past
+      new Date('2026-09-01T00:00:00Z'), // system: what we know now
+    );
+
+    expect(result).toContain(employeeId);
+  });
+
   it('test_narrowing_a_rule_includes_employees_who_no_longer_match', async () => {
     const companyId = await insertCompany(db, 'cand1');
     const alice = await insertEmployee(db, companyId, 'alice@example.com');
@@ -64,7 +115,7 @@ describe('candidatesForRuleChange', () => {
     const ruleId = '00000000-0000-0000-0000-0000000000a1';
     const before = rule(ruleId, slotId, targetId, { op: 'always' });
     const after = rule(ruleId, slotId, targetId, { op: 'eq', field: 'department', value: 'Engineering' });
-    const result = await candidatesForRuleChange(db as unknown as Db, companyId, before, after, new Date('2024-06-01'));
+    const result = await candidatesForRuleChange(db as unknown as Db, companyId, before, after, new Date('2024-06-01'), new Date('2024-06-01'));
 
     expect(result).toContain(alice);
     expect(result).toContain(bob);
@@ -80,7 +131,7 @@ describe('candidatesForRuleChange', () => {
     await insertResolvedAssignment(db as unknown as Db, companyId, employeeId, slotId, targetId, ruleId);
 
     const before = rule(ruleId, slotId, targetId, { op: 'always' });
-    const result = await candidatesForRuleChange(db as unknown as Db, companyId, before, null, new Date('2024-06-01'));
+    const result = await candidatesForRuleChange(db as unknown as Db, companyId, before, null, new Date('2024-06-01'), new Date('2024-06-01'));
     expect(result).toContain(employeeId);
   });
 
@@ -101,7 +152,7 @@ describe('candidatesForRuleChange', () => {
     const ruleId = '00000000-0000-0000-0000-0000000000a2';
     const before = rule(ruleId, managerSlot, oldTarget, { op: 'always' }, 'manual');
     const after = rule(ruleId, managerSlot, newTarget, { op: 'always' }, 'manual');
-    const result = await candidatesForRuleChange(db as unknown as Db, companyId, before, after, new Date('2024-06-01'));
+    const result = await candidatesForRuleChange(db as unknown as Db, companyId, before, after, new Date('2024-06-01'), new Date('2024-06-01'));
 
     expect(result).toContain(oldManager);
     expect(result).toContain(newManager);

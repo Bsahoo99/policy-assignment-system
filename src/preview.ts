@@ -49,7 +49,7 @@ export async function previewRuleImpact(
   systemAt: Date,
   limit = PREVIEW_LIMIT,
 ): Promise<RuleImpactPreview> {
-  const candidateIds = await candidatesForRuleChange(db, companyId, before, after, effectiveAt);
+  const candidateIds = await candidatesForRuleChange(db, companyId, before, after, effectiveAt, systemAt);
   if (candidateIds.length === 0) return { impacted: [], totalCandidates: 0, truncated: false };
 
   const [slots, deps, dynamicGroups] = await Promise.all([

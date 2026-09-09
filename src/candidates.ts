@@ -113,14 +113,30 @@ async function candidatesMatching(
   return rows.map((r) => r.employee_id);
 }
 
+/**
+ * Which employees a rule change can affect.
+ *
+ * The two clocks are independent and both are required. `asOf` is *effective*
+ * time: the instant the rule change takes effect, and therefore the instant at
+ * which an employee's attributes decide whether they match. `systemAt` is
+ * *processing* time: how much of the world we have learned about, and therefore
+ * which version of those attributes we read.
+ *
+ * Passing `asOf` for both -- which this did -- means a rule written today for a
+ * past date selects employees using what we believed on that past date. A
+ * correction learned afterwards is then invisible, and the one employee the rule
+ * was written for is the one left out of the reconciliation set. Write paths pass
+ * the clock's current instant; only a deliberate historical query passes anything
+ * else.
+ */
 export async function candidatesForRuleChange(
   db: Db,
   companyId: string,
   before: Rule | null,
   after: Rule | null,
   asOf: Date,
+  systemAt: Date,
 ): Promise<string[]> {
-  const systemAt = asOf;
   const dynamicGroups = await fetchDynamicGroups(db, companyId);
 
   const [beforeSet, afterSet, resolvedSet, managerSet] = await Promise.all([

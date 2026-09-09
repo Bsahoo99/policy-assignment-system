@@ -381,15 +381,21 @@ Stated plainly rather than discovered:
 
 ### Known convergence defects
 
-An independent review reproduced these against this commit. They are listed with
-their reproductions rather than left to be discovered, because each one narrows a
-guarantee stated elsewhere in this document.
+An independent review reproduced these. They are listed with their reproductions
+rather than left to be discovered, because each one narrows a guarantee stated
+elsewhere in this document.
 
-- **Candidate selection conflates the two clocks.** `candidatesForRuleChange`
-  passes the effective date as the system time, so a rule written today for a
-  past date selects employees using *what was known then* rather than what is
-  known now. A department correction learned after the rule's effective date
-  therefore leaves the employee out of the candidate set.
+One of the original set is now fixed and is described here because the shape of
+the mistake is the point. `candidatesForRuleChange` took a single instant and
+used it as both the effective time and the system time, so a rule written today
+for a past date selected employees using *what was believed on that past date*.
+A correction learned afterwards was invisible, which meant the one employee the
+backdated rule existed for was the one left out of the reconciliation set. The
+two clocks are now separate parameters and write paths pass the clock's current
+instant; `test_backdated_rule_selects_employees_using_current_not_historical_knowledge`
+covers it. The system had two time axes everywhere except in the code deciding
+who to recompute.
+
 - **A new rule schedules only employees who already match.** Creating a
   two-year tenure rule for a one-year employee writes no
   `employee_next_material_date` row and queues no job, so nothing fires at that
@@ -428,9 +434,10 @@ guarantee stated elsewhere in this document.
   boundary that JavaScript builds at UTC midnight. The property test pins the
   session to UTC and so does not cover the discrepancy.
 
-The first four are the substantive ones: they are all instances of the same
-mistake, which is deciding *which* employees and *which* time ranges are
-affected using information that is narrower than what the system already knows.
+The first three are the substantive ones, and together with the fixed
+two-clock defect above they are all instances of one mistake: deciding *which*
+employees and *which* time ranges are affected using information narrower than
+what the system already knows.
 The engine's per-employee resolution is not implicated — resolution given a
 correct state and a correct instant is exercised by the suite. What is wrong is
 the selection of states and instants around it.

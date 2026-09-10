@@ -386,9 +386,9 @@ Stated plainly rather than discovered:
   case is a documented one-time recreate, not a tested upgrade.
 - **Migration concurrency is correct by construction, not by a race test.** The
   advisory lock spans the read-then-apply window, and the DDL commits with its
-  ledger row. Verifying that two processes actually serialise needs real
-  Postgres, which this environment has no daemon for; PGlite is single-process
-  and cannot demonstrate it.
+  ledger row, and both were exercised against `postgres:16`. What has not been
+  run is two migrators started simultaneously against the same database, so the
+  serialisation is argued from the lock rather than observed under contention.
 - **A single bound connection cannot run the engine's parallel reads.** The
   engine issues independent reads with `Promise.all`, which is correct against a
   Pool and wrong against the one client `withTransaction` binds, because a
@@ -409,10 +409,11 @@ Stated plainly rather than discovered:
   Postgres does anyway once a transaction has errored, and `BEGIN`/`COMMIT`/
   `ROLLBACK` run only after the queue drains. `test/transaction.test.ts` pins
   both properties, and both of its cases fail against the earlier adapter.
-- **Real Postgres/worker integration is exercised by code path, not by a
-  running deployment** — the pg-boss worker and `withTransaction` adapters are
-  written and unit-tested against PGlite, but this environment had no Docker
-  daemon for a live Postgres run.
+- **Scale and concurrency under real Postgres are unmeasured.** The topology
+  itself now runs (see above): schema, migrations, seed, transactional enqueue
+  and worker completion were all exercised against `postgres:16`. What has not
+  been done is a population-scale run, a query-plan review, or a test with
+  overlapping writers.
 - **Browser journey verified by HTTP smoke and manual click-through**, not an
   automated browser suite.
 

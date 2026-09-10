@@ -181,8 +181,15 @@ The worker recomputes the full desired state for an employee from source facts a
 rules, diffs it against current, and writes only differences. It does not apply event
 deltas.
 
-Rationale: duplicated, out-of-order, and replayed events are all harmless. An event
-means "this employee is dirty", nothing more.
+Rationale: an event means "this employee is dirty", nothing more, so the recompute
+does not depend on which event arrived, in what order, or how many times.
+
+Scope, because this is easy to overstate and was overstated here: the property
+holds for the *recompute*, not yet for the *plan* around it. Level-triggered
+recompute over the wrong time range is still the wrong answer, and the boundary
+planning has reproduced defects — see "Known convergence defects" in
+ARCHITECTURE.md. Duplicated and replayed jobs are harmless today; out-of-order
+ones are harmless only where the plan is right.
 
 ## D13. Slot dependencies are a validated DAG
 

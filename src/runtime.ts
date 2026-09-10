@@ -21,36 +21,77 @@ let queue: Queue | null = null;
 let clock: Clock | null = null;
 
 /**
- * A Db bound to one connection, with queries serialised.
+ * A Db bound to one connection, with every statement serialised through one
+ * queue — including BEGIN, COMMIT and ROLLBACK.
  *
- * The engine issues independent reads together — `Promise.all` in `reconcile`,
- * `candidates`, `state`, `scheduler` and others. Against a Pool that is correct
- * and fast: each query takes its own connection. Against a single client bound
- * by `withTransaction` it is neither, because a Postgres connection cannot
- * multiplex. `pg` currently tolerates it with a deprecation warning and will
- * throw in pg 9.
+ * Why serialise at all: the engine issues independent reads together
+ * (`Promise.all` in `reconcile`, `candidates`, `state`, `scheduler`). That is
+ * correct against a Pool, where each query takes its own connection, and wrong
+ * against the single client `withTransaction` binds, because a Postgres
+ * connection cannot multiplex. `pg` warns today and throws in pg 9. PGlite
+ * serialises internally and hid it entirely.
  *
- * PGlite hid this: it serialises internally, so the whole suite passes while the
- * documented Postgres topology warns on every reconcile. Serialising here fixes
- * every call site at once, and keeps `Promise.all` meaning "these do not depend
- * on each other" rather than becoming a claim about connections.
+ * Why the queue also owns transaction control: an earlier version of this
+ * adapter serialised the queries but let the caller issue ROLLBACK directly on
+ * the client, and kept draining the queue after a failure. Both were wrong, and
+ * together they lost writes. Given
+ *
+ *     await Promise.all([tx.query('SELECT 1/0'), tx.query('INSERT ...')])
+ *
+ * `Promise.all` rejects as soon as the first query does, the caller rolls back
+ * immediately, and the still-queued INSERT then runs *after* the ROLLBACK — on a
+ * connection that is no longer in a transaction, so it autocommitted and
+ * survived.
+ *
+ * Two rules prevent that. The first failure **poisons** the queue: everything
+ * still queued rejects without touching the connection, which is also what
+ * Postgres would do, since statements after an error in a transaction fail with
+ * "current transaction is aborted". And transaction control goes through
+ * `finalize`, which runs only once the queue has drained — so ROLLBACK is
+ * genuinely last, and the client is not released while work remains.
  */
-function poolClientDb(client: PoolClient): Db {
-  let chain: Promise<unknown> = Promise.resolve();
-  const serial = <T>(run: () => Promise<T>): Promise<T> => {
-    const next = chain.then(run, run);
-    // Keep the chain alive after a rejection; the caller still sees the error.
-    chain = next.then(
+export function serialClient(client: PoolClient): { db: Db; finalize: (sql: string) => Promise<unknown> } {
+  let tail: Promise<unknown> = Promise.resolve();
+  let poison: unknown = null;
+
+  const enqueue = <T>(run: () => Promise<T>): Promise<T> => {
+    const result = tail.then(async () => {
+      if (poison !== null) throw poison;
+      try {
+        return await run();
+      } catch (e) {
+        // First failure ends the transaction; nothing after it may reach the wire.
+        if (poison === null) poison = e;
+        throw e;
+      }
+    });
+    tail = result.then(
       () => undefined,
       () => undefined,
     );
-    return next;
+    return result;
+  };
+
+  /** Runs after the queue drains, and runs even when the queue is poisoned. */
+  const finalize = (sql: string): Promise<unknown> => {
+    const result = tail.then(
+      () => client.query(sql),
+      () => client.query(sql),
+    );
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   };
 
   return {
-    query: <T = Record<string, unknown>>(text: string, params?: unknown[]) =>
-      serial(() => client.query(text, params as never[])) as unknown as Promise<{ rows: T[] }>,
-    exec: (sql: string) => serial(() => client.query(sql)),
+    db: {
+      query: <T = Record<string, unknown>>(text: string, params?: unknown[]) =>
+        enqueue(() => client.query(text, params as never[])) as unknown as Promise<{ rows: T[] }>,
+      exec: (sql: string) => enqueue(() => client.query(sql)),
+    },
+    finalize,
   };
 }
 
@@ -61,14 +102,18 @@ function poolDb(pool: Pool): Db {
     exec: (sql: string) => pool.query(sql),
     withTransaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
       const client = await pool.connect();
-      const tx = poolClientDb(client);
+      const { db: tx, finalize } = serialClient(client);
       try {
-        await client.query('BEGIN');
+        await finalize('BEGIN');
         const out = await fn(tx);
-        await client.query('COMMIT');
+        // Drains the queue first, so a statement still in flight cannot land
+        // after the transaction has ended.
+        await finalize('COMMIT');
         return out;
       } catch (e) {
-        await client.query('ROLLBACK');
+        // Same ordering guarantee on the failure path, and a rollback that
+        // itself fails must not mask the original error.
+        await finalize('ROLLBACK').catch(() => undefined);
         throw e;
       } finally {
         client.release();

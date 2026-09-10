@@ -393,9 +393,22 @@ Stated plainly rather than discovered:
   engine issues independent reads with `Promise.all`, which is correct against a
   Pool and wrong against the one client `withTransaction` binds, because a
   Postgres connection cannot multiplex. PGlite serialises internally and hid it
-  completely; the first real-Postgres run warned on every reconcile. The pool
-  client adapter now serialises, so `Promise.all` keeps meaning "these do not
-  depend on each other" rather than becoming a claim about connections.
+  completely; the first real-Postgres run warned on every reconcile.
+
+  The first attempt at the fix was worse than the problem, and is the clearest
+  example in this project of the recurring failure mode. It serialised the
+  queries but left two gaps: the queue kept draining after a failure, and
+  `ROLLBACK` was issued straight at the client rather than through the queue. So
+  when `Promise.all` rejected on the first statement, the rollback ran
+  immediately and a still-queued `INSERT` executed *after* it — outside any
+  transaction, where it autocommitted and survived. Serialising the parts without
+  serialising the boundary is not serialising.
+
+  The queue now owns transaction control, and the first failure poisons it:
+  everything still queued rejects without reaching the connection, which is what
+  Postgres does anyway once a transaction has errored, and `BEGIN`/`COMMIT`/
+  `ROLLBACK` run only after the queue drains. `test/transaction.test.ts` pins
+  both properties, and both of its cases fail against the earlier adapter.
 - **Real Postgres/worker integration is exercised by code path, not by a
   running deployment** — the pg-boss worker and `withTransaction` adapters are
   written and unit-tested against PGlite, but this environment had no Docker

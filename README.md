@@ -158,7 +158,7 @@ npm run dev      # third terminal
 | Command | What it does |
 | --- | --- |
 | `npm run demo` | End-to-end scenario on a fresh in-memory database. **The fastest way to see the system work.** |
-| `npm test` | 151 tests across 19 files, including `fast-check` property tests |
+| `npm test` | 153 tests across 19 files, including `fast-check` property tests |
 | `npm run dev` | Admin UI — employees, rules, groups, audit |
 | `npm run worker` | pg-boss worker (real Postgres only) |
 | `npm run build` | Production build |

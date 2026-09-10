@@ -119,7 +119,6 @@ export async function updateEmploymentRecord(
        ORDER BY lower(valid)`,
       [companyId, employeeId, systemAt.toISOString(), effectiveAt.toISOString()],
     );
-    if (segments.length === 0) throw new Error('No current employment record for employee');
 
     const patched = (row: EmploymentRow) => ({
       department: fields.department !== undefined ? fields.department : row.department,
@@ -132,11 +131,22 @@ export async function updateEmploymentRecord(
       created_at: row.created_at,
     });
 
+    // A correction has to land inside an employment period. Falling back to the
+    // nearest segment applied the fields somewhere the caller never asked for,
+    // committed, and then failed when the queued reconcile could not build a
+    // state at the requested instant -- the caller saw an error and the data had
+    // still moved. Reject before anything is written instead.
     const current = segments.find((r) => {
       const from = toDate(r.valid_from);
       const to = r.valid_to === null ? null : toDate(r.valid_to);
       return from <= effectiveAt && (to === null || effectiveAt < to);
-    }) ?? segments[0];
+    });
+    if (!current) {
+      throw new Error(
+        `No employment record covers ${effectiveAt.toISOString()} for this employee. ` +
+          `A correction must fall inside an employment period.`,
+      );
+    }
     const next = patched(current);
 
     // Re-assert each segment over its own range, carrying its own untouched

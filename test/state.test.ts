@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { buildEmployeeState, buildEmployeeStates } from '../src/state';
 import type { Db } from '../src/db';
-import { schemaStatements } from '../src/schema-sql';
+import { ensureSchema } from '../src/schema-sql';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,7 +13,7 @@ let db: PGlite;
 
 beforeAll(async () => {
   db = new PGlite({ extensions: { btree_gist } });
-  for (const sql of schemaStatements(join(__dirname, '..'))) await db.exec(sql);
+  await ensureSchema(db as unknown as Db, join(__dirname, '..'));
 });
 
 afterAll(async () => {

@@ -399,23 +399,58 @@ who to recompute.
 - **A new rule schedules only employees who already match.** Creating a
   two-year tenure rule for a one-year employee writes no
   `employee_next_material_date` row and queues no job, so nothing fires at that
-  employee's anniversary. Scheduling must consider employees who will match
-  later, not only those who match now.
+  employee's anniversary.
+
+  *Proposed fix.* Separate the **candidate** set from the **schedule** set. A
+  rule change dirties whoever matches now; it should also schedule whoever could
+  match later. For a predicate containing a `gte_tenure` node — after
+  `expandDynamicGroups`, so thresholds inside dynamic groups count — the schedule
+  set is the employees satisfying that predicate with its tenure nodes removed:
+  everyone already meeting the non-temporal conditions, for whom only time
+  stands in the way. `recomputeNextMaterialDate` runs for those. This reuses
+  `toSql` and stays bounded by the non-temporal predicate rather than sweeping
+  the company.
 - **Segmentation collects one tenure boundary per rule.** A predicate with both
   a lower and an upper tenure bound (`tenure >= 1 AND NOT tenure >= 2`)
   publishes an open-ended segment where it should close at the second
-  threshold. Boundaries need to be discovered per segment, not once per rule.
+  threshold.
+
+  *Proposed fix.* Make boundary discovery iterative instead of one-shot.
+  `planSegments` asks each active rule for one next material date at `T` and
+  builds the whole plan from that answer. Instead, after resolving the segment
+  beginning at `t_k`, ask for the next material date *as of `t_k`* and cut
+  there. Termination is structural — each answer is strictly greater than
+  `t_k` — and the existing `MAX_SEGMENTS_PER_RUN` cap and `continueAt`
+  contract carry over unchanged, now applied to the full boundary stream.
 - **Manager cascades lose their effective dates.** Dependent managers are
   enqueued at the originating job's effective date, and boundary collection
   sees a manager's own assignments but not inbound reporting changes. After a
   future-dated transfer the old manager keeps manager-only training and the new
   one never gains it. A topological sort over slots cannot express a dependency
   that runs between employees.
+
+  *Proposed fix.* Add inbound manager assignments to boundary collection: when
+  planning employee M's timeline, include the valid-range edges of every
+  `resolved_assignments` row in the `manager` slot whose *target* is M. M's plan
+  then cuts at exactly the instants their report count changes, and the cascade
+  job's effective date stops mattering. This is cheaper than threading segment
+  dates through the queue, and it composes with the iterative boundary discovery
+  above rather than duplicating it. The slot DAG stays as it is — it orders slots
+  within an employee; this is the cross-employee edge it was never meant to
+  carry.
 - **A partial record edit replaces the whole future timeline.** `PATCH` builds
   a full snapshot from the record in force at the effective date and supersedes
   everything after it, so patching location in April silently discards a
-  department transfer already scheduled for June. The correction semantics need
-  to be stated and then either preserved field-wise or previewed.
+  department transfer already scheduled for June.
+
+  *Proposed fix.* Make a field-level PATCH mean field-level. Instead of one
+  assertion over `[effectiveAt, ∞)`, walk the known employment segments from
+  `effectiveAt` forward and re-assert each one with only the supplied fields
+  overwritten, preserving the rest. `supersede` remains the single mutation and
+  the two axes are untouched; what changes is that the caller's silence about a
+  field stops meaning "revert it". Replacing an entire future timeline is a
+  legitimate second operation, but it needs its own name and a preview of the
+  scheduled changes it would discard.
 - **A second manual override can succeed without taking effect.** The override
   form always writes priority 100, and the comparator prefers the older logical
   rule on a tie, so a later override loses to an earlier one. Replacement needs
@@ -434,10 +469,17 @@ who to recompute.
   boundary that JavaScript builds at UTC midnight. The property test pins the
   session to UTC and so does not cover the discrepancy.
 
-The first three are the substantive ones, and together with the fixed
-two-clock defect above they are all instances of one mistake: deciding *which*
-employees and *which* time ranges are affected using information narrower than
-what the system already knows.
+The first four are the substantive ones. Together with the fixed two-clock
+defect above, they are instances of one mistake: deciding *which* employees and
+*which* time ranges are affected using information narrower than what the system
+already knows. The last four are narrower — a UI affordance, a provenance
+comparison, a preview that stops at the first order of effects, and a timezone
+assumption in one SQL fragment.
+
+These are not acceptable gaps, and difficulty does not make them so: the brief
+asks for tenure thresholds and for reconciliation after attribute, rule and
+membership changes by name. They are stated here with the fix each one needs so
+that what is missing is legible rather than merely admitted.
 The engine's per-employee resolution is not implicated — resolution given a
 correct state and a correct instant is exercised by the suite. What is wrong is
 the selection of states and instants around it.

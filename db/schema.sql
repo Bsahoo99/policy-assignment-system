@@ -10,6 +10,21 @@
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 -- ---------------------------------------------------------------------------
+-- Which migrations this database has had applied.
+--
+-- Three times in this project a migration was added and a startup path was not
+-- updated, because each path probed for a *feature* of the newest migration --
+-- "does assignment_rules have target_type?" -- and every new migration needed a
+-- new probe somewhere. Recording what ran replaces a growing set of per-feature
+-- checks with one fact the database keeps about itself.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE schema_migrations (
+    name        TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
 -- Tenancy and identity
 -- ---------------------------------------------------------------------------
 

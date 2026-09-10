@@ -4,11 +4,12 @@ import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { PGlite } from '@electric-sql/pglite';
+import { btree_gist } from '@electric-sql/pglite/contrib/btree_gist';
 import { parsePredicate, toSql, PredicateValidationError } from '../src/predicate';
 import { createRule } from '../src/api/writes';
 import { FixedClock } from '../src/clock';
 import type { Db } from '../src/db';
-import { schemaStatements } from '../src/schema-sql';
+import { schemaStatements, ensureSchema, baseSchema, migrationFiles } from '../src/schema-sql';
 import {
   createTestDb,
   insertCompany,
@@ -183,6 +184,61 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
  * time and this one was missed because it is psql, not TypeScript.
  */
 describe('migration delivery', () => {
+  /**
+   * The defect this replaces: each startup path probed for a feature of the
+   * newest migration, so every migration needed a new probe somewhere, and 007
+   * shipped while both probes still stopped at 006. Freshly created databases
+   * were protected and upgraded ones silently were not.
+   */
+  it('test_database_created_before_the_last_migration_receives_it_on_startup', async () => {
+    const pg = new PGlite({ extensions: { btree_gist } });
+    await pg.waitReady;
+    const db = pg as unknown as Db;
+
+    const all = migrationFiles(repoRoot);
+    const older = all.slice(0, -1);
+    const newest = all[all.length - 1];
+
+    // A database as it stood one migration ago.
+    await db.exec(baseSchema(repoRoot));
+    for (const m of older) {
+      await db.exec(m.sql);
+      await db.query('INSERT INTO schema_migrations (name) VALUES ($1)', [m.name]);
+    }
+    const before = await db.query<{ name: string }>('SELECT name FROM schema_migrations');
+    expect(before.rows.map((r) => r.name)).not.toContain(newest.name);
+
+    // Opening it must bring it forward.
+    const { applied } = await ensureSchema(db, repoRoot);
+    expect(applied).toEqual([newest.name]);
+
+    const after = await db.query<{ name: string }>('SELECT name FROM schema_migrations');
+    expect(after.rows.map((r) => r.name).sort()).toEqual(all.map((m) => m.name).sort());
+    await pg.close();
+  });
+
+  it('test_ensure_schema_on_a_current_database_applies_nothing', async () => {
+    const pg = new PGlite({ extensions: { btree_gist } });
+    await pg.waitReady;
+    const db = pg as unknown as Db;
+    await ensureSchema(db, repoRoot);
+    const second = await ensureSchema(db, repoRoot);
+    expect(second.applied).toEqual([]);
+    await pg.close();
+  });
+
+  it('test_database_predating_migration_tracking_is_refused_not_guessed', async () => {
+    const pg = new PGlite({ extensions: { btree_gist } });
+    await pg.waitReady;
+    const db = pg as unknown as Db;
+    // Data present, but no record of what has been applied.
+    await db.exec(baseSchema(repoRoot));
+    await db.query("INSERT INTO companies (name) VALUES ('legacy')");
+    await db.exec('DROP TABLE schema_migrations');
+    await expect(ensureSchema(db, repoRoot)).rejects.toThrow(/predates migration tracking/);
+    await pg.close();
+  });
+
   it('test_docker_entrypoint_globs_migrations_rather_than_listing_them', () => {
     const entrypointDir = join(repoRoot, 'db/docker-entrypoint-initdb.d');
     const files = readdirSync(entrypointDir);

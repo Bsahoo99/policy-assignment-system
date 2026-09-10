@@ -12,7 +12,7 @@ import { updateEmploymentRecord } from '../src/api/writes';
 import type { Db } from '../src/db';
 import type { Clock } from '../src/clock';
 import { randomUUID } from 'crypto';
-import { schemaStatements } from '../src/schema-sql';
+import { ensureSchema } from '../src/schema-sql';
 
 const seedSql = readFileSync(join(process.cwd(), 'db/seed.sql'), 'utf8');
 
@@ -40,7 +40,7 @@ async function targetName(db: Db, companyId: string) {
 
 async function main() {
   const db = new PGlite({ extensions: { btree_gist } });
-  for (const sql of schemaStatements()) await db.exec(sql);
+  await ensureSchema(db as unknown as Db);
   await db.exec(seedSql);
 
   // Add a state-dependent payroll target + rule for the Jane journey.

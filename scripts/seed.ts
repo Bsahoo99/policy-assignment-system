@@ -5,19 +5,11 @@ import { SystemClock } from '../src/clock';
 import { memoryQueue } from '../src/queue';
 import { reconcileEmployee } from '../src/reconcile';
 import type { Db } from '../src/db';
-import { schemaStatements } from '../src/schema-sql';
 
-
-async function ensureSchema(db: Awaited<ReturnType<typeof getDb>>) {
-  const { rows } = await db.query<{ t: string | null }>(`SELECT to_regclass('companies') AS t`);
-  if (!rows[0].t) {
-  for (const sql of schemaStatements()) await db.exec(sql);
-  }
-}
 
 async function main() {
+  // getDb() brings the schema up to date on both backends; nothing to do here.
   const db = await getDb();
-  await ensureSchema(db);
   const { rows } = await db.query<{ id: string }>(
     `SELECT id FROM companies WHERE name = 'Acme Corp'`,
   );

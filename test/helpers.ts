@@ -5,13 +5,13 @@ import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
 import type { Db } from '../src/db';
 import type { Predicate } from '../src/predicate';
-import { schemaStatements } from '../src/schema-sql';
+import { ensureSchema } from '../src/schema-sql';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export async function createTestDb(): Promise<PGlite> {
   const db = new PGlite({ extensions: { btree_gist } });
-  for (const sql of schemaStatements(join(__dirname, '..'))) await db.exec(sql);
+  await ensureSchema(db as unknown as Db, join(__dirname, '..'));
   return db;
 }
 

@@ -31,6 +31,44 @@ async function tableExists(db: Db, name: string): Promise<boolean> {
 }
 
 /**
+ * Arbitrary constant. Every process that migrates this database takes the same
+ * advisory lock, so only one of them is ever inside the read-then-apply window.
+ */
+const MIGRATION_LOCK_KEY = 8274531;
+
+const LEGACY_DATABASE_MESSAGE = [
+  'This database predates migration tracking, so which migrations it has is unknown.',
+  'It is demo data; recreate it rather than guessing:',
+  '  embedded PGlite:  rm -rf .pglite && npm run seed',
+  '  real Postgres:    docker compose down -v && docker compose up -d postgres && npm run seed',
+].join('\n');
+
+async function migrateWithin(tx: Db, root: string, locked: boolean): Promise<string[]> {
+  // Transaction-scoped, so it releases on commit or rollback without a finally.
+  // Taken before the state is read: two runners that both read "007 is pending"
+  // would both apply it, and the second would fail on a duplicate constraint.
+  if (locked) await tx.query('SELECT pg_advisory_xact_lock($1)', [MIGRATION_LOCK_KEY]);
+
+  if (!(await tableExists(tx, 'companies'))) {
+    await tx.exec(baseSchema(root));
+  } else if (!(await tableExists(tx, 'schema_migrations'))) {
+    throw new Error(LEGACY_DATABASE_MESSAGE);
+  }
+
+  const { rows } = await tx.query<{ name: string }>(`SELECT name FROM schema_migrations`);
+  const already = new Set(rows.map((r) => r.name));
+
+  const applied: string[] = [];
+  for (const m of migrationFiles(root)) {
+    if (already.has(m.name)) continue;
+    await tx.exec(m.sql);
+    await tx.query(`INSERT INTO schema_migrations (name) VALUES ($1)`, [m.name]);
+    applied.push(m.name);
+  }
+  return applied;
+}
+
+/**
  * Bring a database to the current schema and record what was applied.
  *
  * This replaces a chain of per-feature probes ("does assignment_rules have
@@ -40,37 +78,31 @@ async function tableExists(db: Db, name: string): Promise<boolean> {
  * migration is applied when `schema_migrations` does not name it. Adding a file
  * is now the whole of adding a migration.
  *
+ * Two properties the first version of this lacked:
+ *
+ * - **Atomic.** The DDL and its ledger row commit together. Postgres has
+ *   transactional DDL, so an interrupted run leaves the database on the last
+ *   fully applied migration rather than in a state where the schema has moved
+ *   but the ledger has not -- which the next startup would try to re-apply, and
+ *   these migrations are not idempotent.
+ * - **Serialised.** An advisory lock spans the read-then-apply window, so two
+ *   processes starting together cannot both decide the same migration is
+ *   pending.
+ *
  * A database holding data but no `schema_migrations` predates this mechanism, and
  * there is no honest way to infer which migrations it has had -- inferring is the
  * per-feature probing this replaces. It is refused, with the recreate command.
- * The demo database is disposable and both READMEs already say so.
+ * The demo database is disposable and the README says so.
  */
 export async function ensureSchema(
   db: Db,
   root: string = process.cwd(),
 ): Promise<{ applied: string[] }> {
-  if (!(await tableExists(db, 'companies'))) {
-    await db.exec(baseSchema(root));
-  } else if (!(await tableExists(db, 'schema_migrations'))) {
-    throw new Error(
-      [
-        'This database predates migration tracking, so which migrations it has is unknown.',
-        'It is demo data; recreate it rather than guessing:',
-        '  embedded PGlite:  rm -rf .pglite && npm run seed',
-        '  real Postgres:    docker compose down -v && docker compose up -d postgres && npm run seed',
-      ].join('\n'),
-    );
+  const withTx = db.withTransaction?.bind(db);
+  if (!withTx) {
+    // Single-connection fixtures (a raw PGlite handle in a test) have no
+    // transaction wrapper and no concurrent writer to race with.
+    return { applied: await migrateWithin(db, root, false) };
   }
-
-  const { rows } = await db.query<{ name: string }>(`SELECT name FROM schema_migrations`);
-  const already = new Set(rows.map((r) => r.name));
-
-  const applied: string[] = [];
-  for (const m of migrationFiles(root)) {
-    if (already.has(m.name)) continue;
-    await db.exec(m.sql);
-    await db.query(`INSERT INTO schema_migrations (name) VALUES ($1)`, [m.name]);
-    applied.push(m.name);
-  }
-  return { applied };
+  return { applied: await withTx((tx) => migrateWithin(tx, root, true)) };
 }

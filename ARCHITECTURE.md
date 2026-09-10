@@ -366,6 +366,21 @@ Stated plainly rather than discovered:
 - **Performance at scale is unverified.** The suite exercises the seeded
   population (3 employees); `buildEmployeeStates` is batched and candidate
   selection uses compiled SQL, but no population-scale benchmark exists.
+- **Databases from before the migration ledger cannot be upgraded, only
+  recreated.** `ensureSchema` brings a database forward by comparing
+  `schema_migrations` to the migrations directory, applying the difference
+  atomically under an advisory lock. That covers every database this version
+  creates. It does not cover a database created by an earlier release, which has
+  no ledger: there is no honest way to infer which migrations it has had, so it
+  is refused with the recreate command. The upgrade path is therefore verified
+  for *tracked* databases missing a newer migration — the test builds one at the
+  previous migration and asserts startup applies the last — and the pre-ledger
+  case is a documented one-time recreate, not a tested upgrade.
+- **Migration concurrency is correct by construction, not by a race test.** The
+  advisory lock spans the read-then-apply window, and the DDL commits with its
+  ledger row. Verifying that two processes actually serialise needs real
+  Postgres, which this environment has no daemon for; PGlite is single-process
+  and cannot demonstrate it.
 - **The Docker path was broken by migration 006 and is fixed but still not
   run here.** The entrypoint was a static list of `\i` lines; adding 006 without
   updating it meant the documented Postgres setup built a schema whose first rule
@@ -402,14 +417,37 @@ who to recompute.
   employee's anniversary.
 
   *Proposed fix.* Separate the **candidate** set from the **schedule** set. A
-  rule change dirties whoever matches now; it should also schedule whoever could
-  match later. For a predicate containing a `gte_tenure` node — after
-  `expandDynamicGroups`, so thresholds inside dynamic groups count — the schedule
-  set is the employees satisfying that predicate with its tenure nodes removed:
-  everyone already meeting the non-temporal conditions, for whom only time
-  stands in the way. `recomputeNextMaterialDate` runs for those. This reuses
-  `toSql` and stays bounded by the non-temporal predicate rather than sweeping
-  the company.
+  rule change dirties whoever matches now; it must also schedule whoever could
+  match later.
+
+  Deleting the tenure nodes and matching what remains is the obvious move and it
+  is wrong: under `or` it widens the predicate to everyone, and under `not` it
+  inverts which employees are affected. The question is not "who matches with the
+  clause removed" but "for whom can this predicate's value still change" — so ask
+  that directly. Compile the predicate twice, once with every `gte_tenure` node
+  forced `TRUE` and once forced `FALSE`, and take the employees for whom the two
+  disagree. That evaluates the whole tree, so `and`, `or` and `not` are handled by
+  construction rather than by case analysis:
+
+  | predicate | forced TRUE | forced FALSE | material? |
+  | --- | --- | --- | --- |
+  | `tenure>=2` | true | false | yes |
+  | `dept=Eng AND tenure>=2`, Eng | true | false | yes |
+  | `dept=Eng AND tenure>=2`, Sales | false | false | no |
+  | `dept=Eng OR tenure>=2`, Eng | true | true | no — already matches |
+  | `dept=Eng OR tenure>=2`, Sales | true | false | yes |
+  | `NOT tenure>=2` | false | true | yes — will *lose* it |
+
+  Several thresholds in one predicate yield a superset, which is the safe
+  direction: `nextMaterialDate` then computes the earliest instant that actually
+  matters. Both compilations are `toSql` against the same `employee_state` CTE,
+  so this is one extra query, bounded by the predicate rather than the company.
+
+  Two details this must not miss. Expansion runs first, so a threshold inside a
+  dynamic group counts. And the scan cannot be limited to rules in force now —
+  a rule whose valid range *starts* next quarter carries thresholds of its own,
+  so the schedule pass reads rules whose valid range intersects `[now, ∞)`, not
+  rules in force at the instant of the write.
 - **Segmentation collects one tenure boundary per rule.** A predicate with both
   a lower and an upper tenure bound (`tenure >= 1 AND NOT tenure >= 2`)
   publishes an open-ended segment where it should close at the second

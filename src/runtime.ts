@@ -51,7 +51,8 @@ function poolDb(pool: Pool): Db {
   };
 }
 
-function pgliteDb(pglite: PGlite): Db {
+/** Exported so tests can exercise the transactional path, not just raw PGlite. */
+export function pgliteDb(pglite: PGlite): Db {
   return {
     query: <T = Record<string, unknown>>(text: string, params?: unknown[]) =>
       pglite.query(text, params) as Promise<{ rows: T[] }>,

@@ -10,6 +10,9 @@ import { createRule } from '../src/api/writes';
 import { FixedClock } from '../src/clock';
 import type { Db } from '../src/db';
 import { schemaStatements, ensureSchema, baseSchema, migrationFiles } from '../src/schema-sql';
+import { pgliteDb } from '../src/runtime';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import {
   createTestDb,
   insertCompany,
@@ -184,6 +187,68 @@ const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
  * time and this one was missed because it is psql, not TypeScript.
  */
 describe('migration delivery', () => {
+  /**
+   * The DDL and its ledger row must commit together. Postgres has transactional
+   * DDL, so an interrupted run leaves the database on the last fully applied
+   * migration -- rather than schema-ahead-of-ledger, which the next startup would
+   * try to re-apply, and these migrations are not idempotent.
+   */
+  it('test_a_failing_migration_leaves_neither_its_schema_change_nor_its_ledger_row', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'warp-mig-'));
+    try {
+      mkdirSync(join(root, 'db/migrations'), { recursive: true });
+      writeFileSync(
+        join(root, 'db/schema.sql'),
+        `CREATE TABLE companies (id SERIAL PRIMARY KEY);
+         CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());`,
+      );
+      writeFileSync(join(root, 'db/migrations/001_ok.sql'), 'CREATE TABLE first_ok (i int);');
+      writeFileSync(join(root, 'db/migrations/002_broken.sql'), 'CREATE TABLE second (i int) THIS IS NOT SQL;');
+
+      const pg = new PGlite({ extensions: { btree_gist } });
+      await pg.waitReady;
+      const db = pgliteDb(pg);
+
+      await expect(ensureSchema(db, root)).rejects.toThrow();
+
+      // Nothing from the failed run survives: not the good migration's table,
+      // not its ledger row, not the broken one's.
+      const tables = await db.query<{ t: string | null }>(
+        "SELECT to_regclass('first_ok') AS t",
+      );
+      expect(tables.rows[0].t).toBeNull();
+      await pg.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('test_a_run_that_succeeds_records_every_migration_it_applied', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'warp-mig-'));
+    try {
+      mkdirSync(join(root, 'db/migrations'), { recursive: true });
+      writeFileSync(
+        join(root, 'db/schema.sql'),
+        `CREATE TABLE companies (id SERIAL PRIMARY KEY);
+         CREATE TABLE schema_migrations (name TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now());`,
+      );
+      writeFileSync(join(root, 'db/migrations/001_a.sql'), 'CREATE TABLE a (i int);');
+      writeFileSync(join(root, 'db/migrations/002_b.sql'), 'CREATE TABLE b (i int);');
+
+      const pg = new PGlite({ extensions: { btree_gist } });
+      await pg.waitReady;
+      const db = pgliteDb(pg);
+
+      const { applied } = await ensureSchema(db, root);
+      expect(applied).toEqual(['001_a.sql', '002_b.sql']);
+      const ledger = await db.query<{ name: string }>('SELECT name FROM schema_migrations ORDER BY name');
+      expect(ledger.rows.map((r) => r.name)).toEqual(['001_a.sql', '002_b.sql']);
+      await pg.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   /**
    * The defect this replaces: each startup path probed for a feature of the
    * newest migration, so every migration needed a new probe somewhere, and 007

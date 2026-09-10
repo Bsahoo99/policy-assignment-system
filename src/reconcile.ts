@@ -7,7 +7,7 @@ import { planSegments, boundariesFrom, type BoundarySources, type Range } from '
 import type { Clock } from './clock';
 import type { Db } from './db';
 import type { Queue, ReconcileResult, ResolvedAssignment, Rule, Slot, SlotDependency, SlotResolution } from './types';
-import { nextMaterialDateForRule, type Predicate } from './predicate';
+import { allMaterialDatesForRule, type Predicate } from './predicate';
 
 /**
  * `db` is either a pool/PGlite adapter (which provides withTransaction) or an
@@ -247,9 +247,12 @@ export async function reconcileEmployee(
     // lives one level down inside the group definition, and expanding here is
     // what makes the anniversary visible to scheduling.
     const dynMap = new Map((await getDynamicGroups(tx, companyId)).map((g) => [g.key, g.criteria]));
+    // Every threshold, not just the next one. A rule bounded on both sides
+    // changes twice, and taking only the first published the window open-ended
+    // past its own end date.
     const tenureThresholds = rules
-      .map((r) => nextMaterialDateForRule(r.criteria, dynMap, state, effectiveAt))
-      .filter((d): d is Date => d !== null && d.getTime() > effectiveAt.getTime());
+      .flatMap((r) => allMaterialDatesForRule(r.criteria, dynMap, state, effectiveAt))
+      .filter((d) => d.getTime() > effectiveAt.getTime());
 
     const sources = await fetchBoundarySources(tx, companyId, employeeId, effectiveAt);
     const boundaries = boundariesFrom({ ...sources, tenureThresholds });

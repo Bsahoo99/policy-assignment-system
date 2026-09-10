@@ -423,8 +423,27 @@ An independent review reproduced these. They are listed with their reproductions
 rather than left to be discovered, because each one narrows a guarantee stated
 elsewhere in this document.
 
-Four of the original set are now fixed and are described here because the shape
-of each mistake is the point.
+All five substantive defects are now fixed. They are described here rather than
+deleted, because the shape each one took is the point: not one of them lived
+inside a component.
+
+**Segmentation now collects every tenure threshold, not just the next one.**
+Boundary collection asked each rule for its *next* threshold after the job's
+instant, so a predicate bounded on both sides — `tenure >= 1 AND NOT tenure >= 2`
+— contributed only its opening cut. The window opened correctly and never closed:
+the policy was published open-ended past its own end date, and by the time anyone
+looked `next_at` was null and nothing would revisit it.
+
+`nextMaterialDate` was never wrong; it answers "when next?", which is the right
+question for scheduling one job and the wrong one for planning a timeline.
+Asking it repeatedly, each time from its own previous answer, walks the whole set
+and terminates because each answer is strictly greater than the instant it was
+asked about. `planSegments` is untouched — the fix belonged in what was collected,
+not in how it was planned.
+`test/segmentation-thresholds.test.ts` asserts the window at all four instants
+around its two anniversaries, the same timeline when processed after both, the
+same timeline on replay, that the other boundary sources still cut, and that a
+plan pushed past the segment cap continues without gaps.
 
 **A field-level record correction no longer erases scheduled changes.** `PATCH`
 built one snapshot from the record in force at its effective date and asserted it
@@ -502,18 +521,6 @@ instant; `test_backdated_rule_selects_employees_using_current_not_historical_kno
 covers it. The system had two time axes everywhere except in the code deciding
 who to recompute.
 
-- **Segmentation collects one tenure boundary per rule.** A predicate with both
-  a lower and an upper tenure bound (`tenure >= 1 AND NOT tenure >= 2`)
-  publishes an open-ended segment where it should close at the second
-  threshold.
-
-  *Proposed fix.* Make boundary discovery iterative instead of one-shot.
-  `planSegments` asks each active rule for one next material date at `T` and
-  builds the whole plan from that answer. Instead, after resolving the segment
-  beginning at `t_k`, ask for the next material date *as of `t_k`* and cut
-  there. Termination is structural — each answer is strictly greater than
-  `t_k` — and the existing `MAX_SEGMENTS_PER_RUN` cap and `continueAt`
-  contract carry over unchanged, now applied to the full boundary stream.
 - **A second manual override can succeed without taking effect.** The override
   form always writes priority 100, and the comparator prefers the older logical
   rule on a tie, so a later override loses to an earlier one. Replacement needs
@@ -532,12 +539,11 @@ who to recompute.
   boundary that JavaScript builds at UTC midnight. The property test pins the
   session to UTC and so does not cover the discrepancy.
 
-The first is the substantive one remaining. Together with the four fixed above,
-they are instances of one mistake: deciding *which* employees and *which* time
-ranges are affected using information narrower than what the system already
-knows. The last four are narrower — a UI affordance, a provenance comparison, a
-preview that stops at the first order of effects, and a timezone assumption in
-one SQL fragment.
+Every one of the five was the same mistake: deciding *which* employees and
+*which* time ranges are affected using information narrower than what the system
+already knows. Four narrower gaps remain open — a UI affordance, a provenance
+comparison, a preview that stops at the first order of effects, and a timezone
+assumption in one SQL fragment.
 
 These are not acceptable gaps, and difficulty does not make them so: the brief
 asks for tenure thresholds and for reconciliation after attribute, rule and

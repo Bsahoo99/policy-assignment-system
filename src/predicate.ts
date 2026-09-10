@@ -504,6 +504,37 @@ function expandOnce(p: Predicate, groups: Map<string, Predicate>): Predicate {
  * on raw rule criteria, or thresholds reachable only through a dynamic group are missed.
  */
 /**
+ * Every future instant at which this rule can change outcome for this employee,
+ * not just the first.
+ *
+ * `nextMaterialDateForRule` answers "when next?", which is the right question
+ * for scheduling one job and the wrong one for planning a timeline. A predicate
+ * bounded on both sides — `tenure >= 1 AND NOT tenure >= 2` — changes twice, and
+ * collecting only the first cut published the window open-ended past its own end
+ * date. Asking repeatedly, each time from the previous answer, walks the whole
+ * set; it terminates because each answer is strictly greater than the instant it
+ * was asked about, and there are finitely many thresholds in a predicate. The cap
+ * is a runaway guard, not the mechanism.
+ */
+export function allMaterialDatesForRule(
+  criteria: Predicate,
+  dynamicGroups: Map<string, Predicate>,
+  s: EmployeeState,
+  after: Date,
+  cap = 64,
+): Date[] {
+  const out: Date[] = [];
+  let cursor = after;
+  for (let i = 0; i < cap; i += 1) {
+    const next = nextMaterialDateForRule(criteria, dynamicGroups, s, cursor);
+    if (!next || next.getTime() <= cursor.getTime()) break;
+    out.push(next);
+    cursor = next;
+  }
+  return out;
+}
+
+/**
  * Does this rule's outcome depend on the passage of time for anyone?
  *
  * Used to decide whether a rule write has to reschedule employees beyond the

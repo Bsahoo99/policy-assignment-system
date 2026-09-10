@@ -440,10 +440,26 @@ Asking it repeatedly, each time from its own previous answer, walks the whole se
 and terminates because each answer is strictly greater than the instant it was
 asked about. `planSegments` is untouched — the fix belonged in what was collected,
 not in how it was planned.
+Collecting every threshold was itself only half of it, and the second half is the
+same mistake one level down. *Which* thresholds exist depends on which rules are
+in force and on the employee's tenure start, and both change across the interval
+being planned — so discovering them once, from the state and rules at the job's
+own instant, misses a rule that activates later and misreads a tenure start that
+a later employment segment moves.
+
+Those two things change only at boundaries already being collected — rule ranges
+and fact ranges — so evaluating at the job's instant plus every one of those
+edges covers every distinct (rules, state) pair in the interval. One pass, not an
+iteration to a fixed point: a newly discovered threshold cannot itself change
+which rules are in force or what the tenure start is. An edge with no employment
+record behind it contributes no threshold and remains a boundary.
+
 `test/segmentation-thresholds.test.ts` asserts the window at all four instants
 around its two anniversaries, the same timeline when processed after both, the
-same timeline on replay, that the other boundary sources still cut, and that a
-plan pushed past the segment cap continues without gaps.
+same timeline on replay, that the other boundary sources still cut, that a plan
+pushed past the segment cap continues without gaps, that a rule activating after
+the start date still contributes its thresholds, and that a later employment
+segment moves them with it.
 
 **A field-level record correction no longer erases scheduled changes.** `PATCH`
 built one snapshot from the record in force at its effective date and asserted it

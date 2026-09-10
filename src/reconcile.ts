@@ -232,14 +232,15 @@ export async function reconcileEmployee(
   const managerEmployeeIds = new Set<string>();
 
   const { result, continueAt } = await runTx(db, async (tx) => {
-    const [slots, deps, rules] = await Promise.all([
+    const [slots, deps] = await Promise.all([
       fetchSlots(tx, companyId),
       fetchDeps(tx, companyId),
-      fetchRules(tx, companyId, employeeId, effectiveAt, systemAt),
     ]);
 
     const orderedSlots = topoOrder(slots, deps);
-    const state = await buildEmployeeState(tx, companyId, employeeId, effectiveAt, systemAt);
+    // No rules or state are read at `effectiveAt` here: everything below reads
+    // them at the instant it is reasoning about, which is the whole point of the
+    // probe loop and of per-segment resolution.
 
     // Tenure thresholds come from the predicate scheduler, not from a scan.
     // Dynamic groups are expanded first: a rule that is just
@@ -247,14 +248,46 @@ export async function reconcileEmployee(
     // lives one level down inside the group definition, and expanding here is
     // what makes the anniversary visible to scheduling.
     const dynMap = new Map((await getDynamicGroups(tx, companyId)).map((g) => [g.key, g.criteria]));
-    // Every threshold, not just the next one. A rule bounded on both sides
-    // changes twice, and taking only the first published the window open-ended
-    // past its own end date.
-    const tenureThresholds = rules
-      .flatMap((r) => allMaterialDatesForRule(r.criteria, dynMap, state, effectiveAt))
-      .filter((d) => d.getTime() > effectiveAt.getTime());
-
     const sources = await fetchBoundarySources(tx, companyId, employeeId, effectiveAt);
+
+    // Which thresholds exist depends on which rules are in force and on the
+    // employee's tenure start, and both change across the interval being planned.
+    // Discovering them once, from the state and rules at `effectiveAt`, misses a
+    // rule that activates later and misreads a tenure start that a later
+    // employment segment moves.
+    //
+    // Those two things change only at boundaries already collected above -- rule
+    // ranges and fact ranges -- so evaluating at `effectiveAt` plus every one of
+    // those edges covers every distinct (rules, state) pair in the interval. One
+    // pass, no iteration to a fixed point: a newly discovered threshold cannot
+    // itself change which rules are in force or what the tenure start is.
+    const probes = [effectiveAt, ...boundariesFrom({ ...sources, tenureThresholds: [] })]
+      .filter((d) => d.getTime() >= effectiveAt.getTime());
+    const probed = new Set<number>();
+    const seen = new Set<number>();
+    const tenureThresholds: Date[] = [];
+    for (const probeAt of probes) {
+      if (probed.has(probeAt.getTime())) continue;
+      probed.add(probeAt.getTime());
+      // No employment record at this instant means no state to measure tenure
+      // from; the edge is still a boundary, it just contributes no threshold.
+      let probeState;
+      try {
+        probeState = await buildEmployeeState(tx, companyId, employeeId, probeAt, systemAt);
+      } catch {
+        continue;
+      }
+      const probeRules = await fetchRules(tx, companyId, employeeId, probeAt, systemAt);
+      for (const r of probeRules) {
+        for (const d of allMaterialDatesForRule(r.criteria, dynMap, probeState, probeAt)) {
+          if (d.getTime() > effectiveAt.getTime() && !seen.has(d.getTime())) {
+            seen.add(d.getTime());
+            tenureThresholds.push(d);
+          }
+        }
+      }
+    }
+
     const boundaries = boundariesFrom({ ...sources, tenureThresholds });
     const plan = planSegments(effectiveAt, boundaries);
     const segments = plan.segments;

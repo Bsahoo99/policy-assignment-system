@@ -184,3 +184,84 @@ describe('a predicate bounded on both sides', () => {
     }
   });
 });
+
+/**
+ * Collecting *every* threshold is not enough if they are all discovered from one
+ * snapshot. Which thresholds exist depends on which rules are in force and on the
+ * employee's tenure start, and both change across the planning interval. A rule
+ * that activates later, or an employment segment that moves the tenure start,
+ * introduces thresholds the initial snapshot cannot see.
+ */
+describe('thresholds introduced later in the planning interval', () => {
+  async function reconcileFrom(companyId: string, employeeId: string, from: string, processedAt: string) {
+    const clock = new FixedClock(at(processedAt));
+    const queue = memoryQueue();
+    await reconcileEmployee(db, companyId, employeeId, at(from), clock, queue);
+    await drainMemoryQueue(db, clock, queue);
+  }
+
+  it('test_a_rule_that_activates_after_the_start_date_contributes_its_thresholds', async () => {
+    const companyId = await insertCompany(db, 'seg-lateRule');
+    const employeeId = await insertEmployee(db, companyId, 'laterule@example.com');
+    await insertEmploymentRecord(db, companyId, employeeId, '2024-01-01');
+    const slotId = await insertSlot(db, companyId, 'vacation', 'exactly_one', 'policy');
+    const targetId = await insertAssignmentTarget(db, companyId, 'policy', 'Mid-Tenure Policy');
+
+    // The rule only takes effect in September, after the instant we reconcile from.
+    await db.query(
+      `INSERT INTO assignment_rules
+         (company_id, rule_id, rule_created_at, slot_id, target_id, name, source, effect, priority,
+          criteria, valid, system)
+       VALUES ($1, gen_random_uuid(), '2024-01-01T00:00:00Z', $2, $3, 'One to two years', 'rule', 'grant', 0,
+               $4::jsonb,
+               tstzrange('2024-09-01T00:00:00Z'::timestamptz, NULL),
+               tstzrange('2024-01-01T00:00:00Z'::timestamptz, NULL))`,
+      [companyId, slotId, targetId, JSON.stringify(betweenOneAndTwo)],
+    );
+
+    await reconcileFrom(companyId, employeeId, '2024-06-01', '2027-01-01');
+
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2024-12-31T23:59:59Z')).toBe(false);
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2025-01-01T00:00:00Z'),
+      'a rule in force from September still opens at the first anniversary').toBe(true);
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2025-12-31T23:59:59Z')).toBe(true);
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2026-01-01T00:00:00Z'),
+      'and closes at the second').toBe(false);
+  });
+
+  it('test_a_later_employment_segment_moves_the_thresholds_with_it', async () => {
+    const companyId = await insertCompany(db, 'seg-tenureShift');
+    const employeeId = await insertEmployee(db, companyId, 'shift@example.com');
+    const slotId = await insertSlot(db, companyId, 'vacation', 'exactly_one', 'policy');
+    const targetId = await insertAssignmentTarget(db, companyId, 'policy', 'Mid-Tenure Policy');
+    await insertRule(db, companyId, slotId, targetId, 'One to two years', betweenOneAndTwo);
+
+    // Two employment segments with different tenure starts. Under the first the
+    // employee never reaches a year before it ends; under the second they hit one
+    // year exactly as it begins.
+    for (const [from, to, tenureStart] of [
+      ['2024-01-01', '2025-07-01', '2025-01-01'],
+      ['2025-07-01', null, '2024-07-01'],
+    ] as const) {
+      await db.query(
+        `INSERT INTO employment_records
+           (company_id, employee_id, department, location_state, location_country,
+            employment_type, pay_type, tenure_start_date, valid, system)
+         VALUES ($1, $2, 'Engineering', 'CA', 'US', 'w2_employee', 'salary', $3,
+                 tstzrange($4::timestamptz, $5::timestamptz),
+                 tstzrange('2024-01-01T00:00:00Z'::timestamptz, NULL))`,
+        [companyId, employeeId, tenureStart, `${from}T00:00:00Z`, to ? `${to}T00:00:00Z` : null],
+      );
+    }
+
+    await reconcileFrom(companyId, employeeId, '2024-06-01', '2027-01-01');
+
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2025-06-30T00:00:00Z'),
+      'not eligible under the first segment').toBe(false);
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2025-07-01T00:00:00Z'),
+      'eligible as the second segment begins').toBe(true);
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2026-06-30T00:00:00Z')).toBe(true);
+    expect(await holds(companyId, employeeId, 'Mid-Tenure Policy', '2026-07-01T00:00:00Z'),
+      'and ends two years after the later tenure start').toBe(false);
+  });
+});

@@ -423,8 +423,23 @@ An independent review reproduced these. They are listed with their reproductions
 rather than left to be discovered, because each one narrows a guarantee stated
 elsewhere in this document.
 
-Three of the original set are now fixed and are described here because the shape
+Four of the original set are now fixed and are described here because the shape
 of each mistake is the point.
+
+**A field-level record correction no longer erases scheduled changes.** `PATCH`
+built one snapshot from the record in force at its effective date and asserted it
+over `[effectiveAt, ∞)`, so correcting a location in April deleted a department
+transfer already scheduled for June. The caller never mentioned department, and
+silence about a field was being read as "revert it".
+
+The write now walks every believed segment from `effectiveAt` forward and
+re-asserts each over its own range, carrying that segment's own untouched fields;
+the first starts at `effectiveAt`, because a correction does not reach backwards.
+`supersede` remains the only mutation and neither axis changes meaning — what
+changes is that a field-level patch is now field-level.
+`test/record-patch.test.ts` covers the transfer surviving, the corrected field
+applying across every later segment, and the pre-correction belief still
+reproducing the original records.
 
 **Manager propagation now cuts at the reporting-line boundary.** After a
 future-dated transfer, the old manager kept manager-only training indefinitely
@@ -499,19 +514,6 @@ who to recompute.
   there. Termination is structural — each answer is strictly greater than
   `t_k` — and the existing `MAX_SEGMENTS_PER_RUN` cap and `continueAt`
   contract carry over unchanged, now applied to the full boundary stream.
-- **A partial record edit replaces the whole future timeline.** `PATCH` builds
-  a full snapshot from the record in force at the effective date and supersedes
-  everything after it, so patching location in April silently discards a
-  department transfer already scheduled for June.
-
-  *Proposed fix.* Make a field-level PATCH mean field-level. Instead of one
-  assertion over `[effectiveAt, ∞)`, walk the known employment segments from
-  `effectiveAt` forward and re-assert each one with only the supplied fields
-  overwritten, preserving the rest. `supersede` remains the single mutation and
-  the two axes are untouched; what changes is that the caller's silence about a
-  field stops meaning "revert it". Replacing an entire future timeline is a
-  legitimate second operation, but it needs its own name and a preview of the
-  scheduled changes it would discard.
 - **A second manual override can succeed without taking effect.** The override
   form always writes priority 100, and the comparator prefers the older logical
   rule on a tie, so a later override loses to an earlier one. Replacement needs
@@ -530,7 +532,7 @@ who to recompute.
   boundary that JavaScript builds at UTC midnight. The property test pins the
   session to UTC and so does not cover the discrepancy.
 
-The first two are the substantive ones. Together with the three fixed above,
+The first is the substantive one remaining. Together with the four fixed above,
 they are instances of one mistake: deciding *which* employees and *which* time
 ranges are affected using information narrower than what the system already
 knows. The last four are narrower — a UI affordance, a provenance comparison, a

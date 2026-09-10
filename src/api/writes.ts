@@ -105,36 +105,57 @@ export async function updateEmploymentRecord(
   const systemAt = clock.now();
   await runTx(db, async (tx) => {
     const q = await txQueue(tx, db, queue);
-    const { rows } = await tx.query<EmploymentRow>(
+    // Every believed segment from `effectiveAt` onward, not just the one in force
+    // at that instant. Asserting a single snapshot over [effectiveAt, infinity)
+    // is what deleted a transfer already scheduled for a later date: the caller
+    // said nothing about department, and silence was read as "revert it".
+    const { rows: segments } = await tx.query<EmploymentRow & { valid_from: unknown; valid_to: unknown }>(
       `SELECT id, department, location_state, location_country, employment_type, pay_type,
-              tenure_start_date, recorded_by, created_at
+              tenure_start_date, recorded_by, created_at,
+              lower(valid) AS valid_from, upper(valid) AS valid_to
        FROM employment_records
-       WHERE company_id = $1 AND employee_id = $2 AND valid @> $3::timestamptz AND system @> $4::timestamptz`,
-      [companyId, employeeId, effectiveAt.toISOString(), systemAt.toISOString()],
+       WHERE company_id = $1 AND employee_id = $2 AND system @> $3::timestamptz
+         AND (upper(valid) > $4::timestamptz OR upper_inf(valid))
+       ORDER BY lower(valid)`,
+      [companyId, employeeId, systemAt.toISOString(), effectiveAt.toISOString()],
     );
-    const current = rows[0];
-    if (!current) throw new Error('No current employment record for employee');
+    if (segments.length === 0) throw new Error('No current employment record for employee');
 
-    const next = {
-      department: fields.department !== undefined ? fields.department : current.department,
-      location_state: fields.location_state !== undefined ? fields.location_state : current.location_state,
-      location_country: fields.location_country ?? current.location_country,
-      employment_type: fields.employment_type ?? current.employment_type,
-      pay_type: fields.pay_type ?? current.pay_type,
-      tenure_start_date: fields.tenure_start_date ?? (current.tenure_start_date instanceof Date ? current.tenure_start_date.toISOString().slice(0, 10) : String(current.tenure_start_date).slice(0, 10)),
-      recorded_by: current.recorded_by,
-      created_at: current.created_at,
-    };
-
-    await supersede(tx, {
-      table: 'employment_records',
-      companyId,
-      key: { employee_id: employeeId },
-      payload: next,
-      validFrom: effectiveAt,
-      validTo: null,
-      now: systemAt,
+    const patched = (row: EmploymentRow) => ({
+      department: fields.department !== undefined ? fields.department : row.department,
+      location_state: fields.location_state !== undefined ? fields.location_state : row.location_state,
+      location_country: fields.location_country ?? row.location_country,
+      employment_type: fields.employment_type ?? row.employment_type,
+      pay_type: fields.pay_type ?? row.pay_type,
+      tenure_start_date: fields.tenure_start_date ?? (row.tenure_start_date instanceof Date ? row.tenure_start_date.toISOString().slice(0, 10) : String(row.tenure_start_date).slice(0, 10)),
+      recorded_by: row.recorded_by,
+      created_at: row.created_at,
     });
+
+    const current = segments.find((r) => {
+      const from = toDate(r.valid_from);
+      const to = r.valid_to === null ? null : toDate(r.valid_to);
+      return from <= effectiveAt && (to === null || effectiveAt < to);
+    }) ?? segments[0];
+    const next = patched(current);
+
+    // Re-assert each segment over its own range, carrying its own untouched
+    // fields. The first one starts at `effectiveAt`, since the correction does
+    // not reach backwards.
+    for (const seg of segments) {
+      const segFrom = toDate(seg.valid_from);
+      const from = segFrom.getTime() > effectiveAt.getTime() ? segFrom : effectiveAt;
+      const to = seg.valid_to === null ? null : toDate(seg.valid_to);
+      await supersede(tx, {
+        table: 'employment_records',
+        companyId,
+        key: { employee_id: employeeId },
+        payload: patched(seg),
+        validFrom: from,
+        validTo: to,
+        now: systemAt,
+      });
+    }
     await tx.query(
       `INSERT INTO audit_events (company_id, actor_id, actor_kind, action, entity_type, entity_id, before, after)
        VALUES ($1, NULL, 'system', 'update', 'employment_record', $2, $3::jsonb, $4::jsonb)`,

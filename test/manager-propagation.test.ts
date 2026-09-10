@@ -8,7 +8,7 @@ import {
   insertSlot,
   insertAssignmentTarget,
 } from './helpers';
-import { createRule, createManualOverride, updateRule } from '../src/api/writes';
+import { createRule, createManualOverride } from '../src/api/writes';
 import { reconcileEmployee } from '../src/reconcile';
 import { memoryQueue } from '../src/queue';
 import { drainMemoryQueue } from '../src/runtime';
@@ -27,13 +27,14 @@ const on = (iso: string) => new Date(`${iso}T00:00:00Z`);
 
 /** Does this employee hold the given target at this instant? */
 async function holds(companyId: string, employeeId: string, target: string, at: string) {
+  const instant = at.includes('T') ? at : `${at}T00:00:00Z`;
   const { rows } = await db.query<{ n: number }>(
     `SELECT count(*)::int AS n
        FROM resolved_assignments ra
        JOIN assignment_targets t ON t.id = ra.target_id
       WHERE ra.company_id = $1 AND ra.employee_id = $2 AND t.display_name = $3
         AND ra.valid @> $4::timestamptz AND upper_inf(ra.system)`,
-    [companyId, employeeId, target, `${at}T00:00:00Z`],
+    [companyId, employeeId, target, instant],
   );
   return rows[0].n > 0;
 }
@@ -129,37 +130,46 @@ describe('manager propagation across a reporting-line change', () => {
   it('test_manager_training_follows_the_reporting_line_at_the_boundary', async () => {
     const { companyId, alice, bob } = await scenario(on('2025-02-01'));
 
-    expect(await holds(companyId, alice, 'Manager Training', '2025-03-01'),
-      'Alice still manages Carol before June').toBe(true);
-    expect(await holds(companyId, bob, 'Manager Training', '2025-03-01'),
-      'Bob manages nobody before June').toBe(false);
+    // The instant before the transfer, and the transfer instant itself. A month
+    // either side would pass even if the boundary landed in the wrong place.
+    const before = '2025-05-31T23:59:59Z';
+    const at = '2025-06-01T00:00:00Z';
 
-    expect(await holds(companyId, alice, 'Manager Training', '2025-09-01'),
-      'Alice has no reports after the transfer').toBe(false);
-    expect(await holds(companyId, bob, 'Manager Training', '2025-09-01'),
-      'Bob gains the training at the transfer').toBe(true);
+    expect(await holds(companyId, alice, 'Manager Training', before),
+      'Alice still manages Carol up to the transfer').toBe(true);
+    expect(await holds(companyId, bob, 'Manager Training', before),
+      'Bob manages nobody up to the transfer').toBe(false);
+
+    expect(await holds(companyId, alice, 'Manager Training', at),
+      'Alice loses the training exactly at the transfer').toBe(false);
+    expect(await holds(companyId, bob, 'Manager Training', at),
+      'Bob gains the training exactly at the transfer').toBe(true);
   });
 
   it('test_the_same_holds_when_the_transfer_is_processed_late', async () => {
     // Written and processed in August, effective back in June.
     const { companyId, alice, bob } = await scenario(on('2025-08-01'));
 
-    expect(await holds(companyId, alice, 'Manager Training', '2025-03-01')).toBe(true);
-    expect(await holds(companyId, alice, 'Manager Training', '2025-09-01')).toBe(false);
-    expect(await holds(companyId, bob, 'Manager Training', '2025-09-01')).toBe(true);
+    expect(await holds(companyId, alice, 'Manager Training', '2025-05-31T23:59:59Z')).toBe(true);
+    expect(await holds(companyId, bob, 'Manager Training', '2025-05-31T23:59:59Z')).toBe(false);
+    expect(await holds(companyId, alice, 'Manager Training', '2025-06-01T00:00:00Z')).toBe(false);
+    expect(await holds(companyId, bob, 'Manager Training', '2025-06-01T00:00:00Z')).toBe(true);
   });
 
   it('test_replaying_the_cascade_produces_the_same_result', async () => {
     const { companyId, alice, bob, carol, clock } = await scenario(on('2025-02-01'));
 
+    // Replay from the original January instant, not from the boundary: a job
+    // replayed at the boundary would find it without having to discover it.
     const queue = memoryQueue();
     for (const e of [carol, alice, bob]) {
-      await reconcileEmployee(db, companyId, e, on('2025-06-01'), clock, queue);
+      await reconcileEmployee(db, companyId, e, on('2025-01-01'), clock, queue);
     }
     await drainMemoryQueue(db, clock, queue);
 
-    expect(await holds(companyId, alice, 'Manager Training', '2025-03-01')).toBe(true);
-    expect(await holds(companyId, alice, 'Manager Training', '2025-09-01')).toBe(false);
-    expect(await holds(companyId, bob, 'Manager Training', '2025-09-01')).toBe(true);
+    expect(await holds(companyId, alice, 'Manager Training', '2025-05-31T23:59:59Z')).toBe(true);
+    expect(await holds(companyId, bob, 'Manager Training', '2025-05-31T23:59:59Z')).toBe(false);
+    expect(await holds(companyId, alice, 'Manager Training', '2025-06-01T00:00:00Z')).toBe(false);
+    expect(await holds(companyId, bob, 'Manager Training', '2025-06-01T00:00:00Z')).toBe(true);
   });
 });

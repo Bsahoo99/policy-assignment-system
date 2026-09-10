@@ -2,8 +2,13 @@ import { candidatesForRuleChange } from '../candidates';
 import { validateSlotGraph } from '../cascade';
 import { fetchDeps } from '../reconcile';
 import { supersede } from '../temporal';
-import { recomputeNextMaterialDate } from '../scheduler';
-import { validateGroupPredicate, parsePredicate, toSql, type Predicate } from '../predicate';
+import {
+  recomputeNextMaterialDate,
+  computeEmployeeMaterialDates,
+  upsertMaterialDates,
+} from '../scheduler';
+import { getDynamicGroups } from '../state';
+import { validateGroupPredicate, parsePredicate, toSql, mentionsTenure, type Predicate } from '../predicate';
 import { drainMemoryQueue, transactionalQueue } from '../runtime';
 import { memoryQueue } from '../queue';
 import type { Clock } from '../clock';
@@ -215,6 +220,8 @@ export async function createRule(
       await q.send('resolve-assignment', { company_id: companyId, employee_ids: [empId], effective_at: effectiveAt.toISOString() });
       await recomputeNextMaterialDate(tx, companyId, empId, systemAt);
     }
+    // Candidates are who matches now; this is who could match later.
+    await rescheduleForTimeDependentRule(tx, companyId, rule.criteria, effectiveAt, systemAt);
   });
   if (queue) await drainMemoryQueue(db, clock, queue);
   return ruleId;
@@ -235,6 +242,38 @@ async function slotTargetType(db: Db, companyId: string, slotId: string): Promis
     throw new Error(`slot ${slotId} does not belong to company ${companyId}`);
   }
   return rows[0].target_type;
+}
+
+/**
+ * A rule change dirties whoever matches it now. It must also *schedule* whoever
+ * could match it later, and those are different sets: an employee one year into
+ * a two-year rule matches nothing today, so they are not a candidate, so nothing
+ * was ever scheduled for them and the anniversary passed unnoticed. That is the
+ * employee the rule was written for.
+ *
+ * The set cannot be narrowed by simplifying the predicate -- a predicate's truth
+ * over time depends on the whole tree, and for `tenure >= 1 AND NOT tenure >= 2`
+ * every simplification reports the employee as unaffected while the real answer
+ * is that they gain the policy at one year and lose it at two. So this is
+ * deliberately conservative: one pass over the company. Rules that do not depend
+ * on time skip it entirely, and `computeEmployeeMaterialDates` batches the reads
+ * rather than looping queries.
+ */
+async function rescheduleForTimeDependentRule(
+  tx: Db,
+  companyId: string,
+  criteria: Predicate,
+  effectiveAt: Date,
+  systemAt: Date,
+): Promise<void> {
+  const dynMap = new Map((await getDynamicGroups(tx, companyId)).map((g) => [g.key, g.criteria]));
+  // A rule that takes effect later moves everyone it could reach at that instant,
+  // so its activation is a boundary even when nothing about it mentions tenure.
+  const timeDependent =
+    mentionsTenure(criteria, dynMap) || effectiveAt.getTime() > systemAt.getTime();
+  if (!timeDependent) return;
+
+  await upsertMaterialDates(tx, companyId, await computeEmployeeMaterialDates(tx, companyId, systemAt));
 }
 
 export interface RulePatch {
@@ -309,6 +348,8 @@ export async function updateRule(
       await q.send('resolve-assignment', { company_id: companyId, employee_ids: [empId], effective_at: effectiveAt.toISOString() });
       await recomputeNextMaterialDate(tx, companyId, empId, systemAt);
     }
+    // Candidates are who matches now; this is who could match later.
+    await rescheduleForTimeDependentRule(tx, companyId, after.criteria, effectiveAt, systemAt);
   });
   if (queue) await drainMemoryQueue(db, clock, queue);
 }
@@ -377,6 +418,8 @@ export async function createManualOverride(
       await q.send('resolve-assignment', { company_id: companyId, employee_ids: [empId], effective_at: effectiveAt.toISOString() });
       await recomputeNextMaterialDate(tx, companyId, empId, systemAt);
     }
+    // Candidates are who matches now; this is who could match later.
+    await rescheduleForTimeDependentRule(tx, companyId, rule.criteria, effectiveAt, systemAt);
   });
   if (queue) await drainMemoryQueue(db, clock, queue);
   return ruleId;

@@ -423,8 +423,30 @@ An independent review reproduced these. They are listed with their reproductions
 rather than left to be discovered, because each one narrows a guarantee stated
 elsewhere in this document.
 
-One of the original set is now fixed and is described here because the shape of
-the mistake is the point. `candidatesForRuleChange` took a single instant and
+Two of the original set are now fixed and are described here because the shape of
+each mistake is the point.
+
+**A new rule now schedules employees who do not match it yet.** Creating a
+two-year rule for a one-year employee used to write no
+`employee_next_material_date` row and queue no job, so the anniversary passed
+unnoticed — and that employee is precisely who the rule was written for.
+Candidate selection answers "who matches now"; scheduling needs "who could match
+later", and they are different sets. A rule whose criteria mention tenure after
+group expansion, or that takes effect later, now recomputes material dates across
+the company rather than across the candidate set. The scheduler also reads rules
+that are *going to be* in force, not only those in force now, and treats a rule's
+own activation instant as a boundary.
+
+The set is deliberately conservative and the cost is one pass over the company's
+employees per time-dependent rule write; rules that do not depend on time skip it
+entirely, and the reads are batched. Narrowing it by simplifying the predicate is
+unsound — see the note under segmentation below — so the honest options were a
+conservative set with a stated cost, or a wrong one. `test/tenure-scheduling.test.ts`
+covers gaining eligibility, losing it, a threshold hidden inside a dynamic group,
+a rule that becomes effective later, and the anniversary actually producing the
+assignment; four of its five cases fail without the change.
+
+**Candidate selection used to conflate the two clocks.** `candidatesForRuleChange` took a single instant and
 used it as both the effective time and the system time, so a rule written today
 for a past date selected employees using *what was believed on that past date*.
 A correction learned afterwards was invisible, which meant the one employee the
@@ -433,63 +455,6 @@ two clocks are now separate parameters and write paths pass the clock's current
 instant; `test_backdated_rule_selects_employees_using_current_not_historical_knowledge`
 covers it. The system had two time axes everywhere except in the code deciding
 who to recompute.
-
-- **A new rule schedules only employees who already match.** Creating a
-  two-year tenure rule for a one-year employee writes no
-  `employee_next_material_date` row and queues no job, so nothing fires at that
-  employee's anniversary.
-
-  *Proposed fix.* Separate the **candidate** set from the **schedule** set. A
-  rule change dirties whoever matches now; it must also schedule whoever could
-  match later.
-
-  The per-employee arithmetic is already correct and does not need replacing.
-  `nextMaterialDate` walks the predicate and returns the earliest tenure boundary
-  after a given instant, so a predicate with several thresholds — including the
-  `tenure >= 1 AND NOT tenure >= 2` case listed below — yields each boundary in
-  turn as time passes. Nothing about the algorithm is wrong; the defect is
-  entirely about which employees it is run over, which today is the candidate set
-  and therefore excludes exactly the employees who do not match yet.
-
-  So the fix is to widen the set, not to invent a cleverer predicate. When a
-  created or edited rule contains a `gte_tenure` node — after
-  `expandDynamicGroups`, so thresholds inside dynamic groups count —
-  `recomputeNextMaterialDate` runs across the company's employees rather than
-  across the candidate set alone.
-
-  What is verified and what is not: tests pin the predicate's value over time and
-  `nextMaterialDate`'s threshold arithmetic, including the two-sided case below.
-  They do not exercise the company-wide scheduling pass, which is a design here
-  and not yet an implementation.
-
-  It is worth being explicit that this is a deliberately conservative set, and
-  why a narrower one was rejected. The tempting move is to match some sub-part of
-  the predicate with the tenure clauses stripped out. That is unsound: a
-  predicate's truth over time depends on the whole tree, so under `or` the
-  stripped predicate widens to everyone and under `not` it inverts, and for
-  `tenure >= 1 AND NOT tenure >= 2` forcing the thresholds to constants makes the
-  predicate false in both directions while the real answer is true between the
-  first and second anniversary — a false negative, which is the one error
-  scheduling cannot tolerate.
-
-  Two requirements this must not lose. Expansion runs first, so a threshold
-  inside a dynamic group counts. And the pass cannot read only the rules in force
-  at the instant of the write: a rule whose valid range *starts* next quarter
-  carries thresholds of its own, and running today's scheduler over the whole
-  population still finds nothing for it. The scan therefore covers rules visible
-  at the chosen system time whose valid ranges intersect the future planning
-  interval — and a rule's own activation instant is itself a material date, so
-  those boundaries belong in `employee_next_material_date` alongside tenure
-  anniversaries. `nextMaterialDate` knows only about tenure today; rule
-  activation is the second source it needs.
-
-  The cost is one pass over the company's employees per rule change that
-  mentions tenure. Rules without a tenure node skip it entirely, and the pass
-  batches through `buildEmployeeStates` rather than looping queries, but it is a
-  population-scale operation on a write path and should be measured before it is
-  called cheap. If it proves too expensive, the sound narrowing is to evaluate
-  the full predicate at each of the employee's own candidate boundaries rather
-  than to simplify the predicate — same answer, more queries, no false negatives.
 
 - **Segmentation collects one tenure boundary per rule.** A predicate with both
   a lower and an upper tenure bound (`tenure >= 1 AND NOT tenure >= 2`)
@@ -550,12 +515,12 @@ who to recompute.
   boundary that JavaScript builds at UTC midnight. The property test pins the
   session to UTC and so does not cover the discrepancy.
 
-The first four are the substantive ones. Together with the fixed two-clock
-defect above, they are instances of one mistake: deciding *which* employees and
-*which* time ranges are affected using information narrower than what the system
-already knows. The last four are narrower — a UI affordance, a provenance
-comparison, a preview that stops at the first order of effects, and a timezone
-assumption in one SQL fragment.
+The first three are the substantive ones. Together with the two fixed above,
+they are instances of one mistake: deciding *which* employees and *which* time
+ranges are affected using information narrower than what the system already
+knows. The last four are narrower — a UI affordance, a provenance comparison, a
+preview that stops at the first order of effects, and a timezone assumption in
+one SQL fragment.
 
 These are not acceptable gaps, and difficulty does not make them so: the brief
 asks for tenure thresholds and for reconciliation after attribute, rule and

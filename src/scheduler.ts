@@ -1,4 +1,4 @@
-import { nextMaterialDateForRule, type Predicate } from './predicate';
+import { nextMaterialDateForRule, type Predicate, type EmployeeState } from './predicate';
 import { buildEmployeeState, buildEmployeeStates, getDynamicGroups } from './state';
 import type { Db } from './db';
 import type { Queue, Rule } from './types';
@@ -29,7 +29,11 @@ export async function fetchActiveRules(db: Db, companyId: string, asOf: Date): P
        AND system @> $3::timestamptz`,
     [companyId, asOf.toISOString(), asOf.toISOString()],
   );
-  return rows.map((r) => ({
+  return rows.map(toRule);
+}
+
+function toRule(r: RuleRow): Rule {
+  return {
     id: r.id,
     ruleId: r.rule_id,
     ruleCreatedAt: r.rule_created_at instanceof Date ? r.rule_created_at : new Date(String(r.rule_created_at)),
@@ -43,7 +47,63 @@ export async function fetchActiveRules(db: Db, companyId: string, asOf: Date): P
     criteria: r.criteria as Predicate,
     subjectEmployeeId: r.subject_employee_id,
     createdAt: r.created_at instanceof Date ? r.created_at : new Date(String(r.created_at)),
+  };
+}
+
+/**
+ * Rules for *scheduling*, which is a wider set than rules for *resolving*.
+ *
+ * `fetchActiveRules` asks which rules are in force at an instant, which is the
+ * right question when resolving. It is the wrong question when deciding what to
+ * schedule: a rule whose valid range starts next quarter carries thresholds of
+ * its own, and asking only about today finds nothing for it. This returns rules
+ * in force now *or* starting later, and each rule's own activation instant --
+ * itself a material date, since an employee's assignments can change the moment
+ * a rule takes effect.
+ */
+export async function fetchSchedulableRules(
+  db: Db,
+  companyId: string,
+  asOf: Date,
+): Promise<{ rule: Rule; validFrom: Date }[]> {
+  const { rows } = await db.query<RuleRow & { valid_from: unknown }>(
+    `SELECT id, rule_id, rule_created_at, company_id, slot_id, target_id, name, source, effect, priority, criteria,
+            subject_employee_id, created_at, lower(valid) AS valid_from
+     FROM assignment_rules
+     WHERE company_id = $1
+       AND system @> $2::timestamptz
+       AND (valid @> $2::timestamptz OR lower(valid) > $2::timestamptz)`,
+    [companyId, asOf.toISOString()],
+  );
+  return rows.map((r) => ({
+    rule: toRule(r),
+    validFrom: r.valid_from instanceof Date ? r.valid_from : new Date(String(r.valid_from)),
   }));
+}
+
+/** Earliest instant this rule can change outcome for this employee, after `asOf`. */
+function materialDateFor(
+  entry: { rule: Rule; validFrom: Date },
+  dynMap: Map<string, Predicate>,
+  state: EmployeeState,
+  employeeId: string,
+  asOf: Date,
+): Date | null {
+  const { rule, validFrom } = entry;
+  if (rule.source === 'manual' && rule.subjectEmployeeId !== employeeId) return null;
+
+  const candidates: Date[] = [];
+  // The rule taking effect is itself a boundary.
+  if (validFrom.getTime() > asOf.getTime()) candidates.push(validFrom);
+
+  // Thresholds are measured from the later of now and the rule's activation:
+  // a threshold already passed before the rule exists is not a future change.
+  const from = validFrom.getTime() > asOf.getTime() ? validFrom : asOf;
+  const threshold = nextMaterialDateForRule(rule.criteria, dynMap, state, from);
+  if (threshold) candidates.push(threshold);
+
+  if (candidates.length === 0) return null;
+  return candidates.sort((a, b) => a.getTime() - b.getTime())[0];
 }
 
 export async function computeEmployeeMaterialDates(
@@ -53,7 +113,7 @@ export async function computeEmployeeMaterialDates(
 ): Promise<Map<string, Date | null>> {
   const [states, rules, dynamicGroups] = await Promise.all([
     buildEmployeeStates(db, companyId, 'all', asOf, asOf),
-    fetchActiveRules(db, companyId, asOf),
+    fetchSchedulableRules(db, companyId, asOf),
     getDynamicGroups(db, companyId),
   ]);
   const dynMap = new Map(dynamicGroups.map((g) => [g.key, g.criteria]));
@@ -61,9 +121,8 @@ export async function computeEmployeeMaterialDates(
   const result = new Map<string, Date | null>();
   for (const [employeeId, state] of states) {
     let next: Date | null = null;
-    for (const rule of rules) {
-      if (rule.source === 'manual' && rule.subjectEmployeeId !== employeeId) continue;
-      const candidate = nextMaterialDateForRule(rule.criteria, dynMap, state, asOf);
+    for (const entry of rules) {
+      const candidate = materialDateFor(entry, dynMap, state, employeeId, asOf);
       if (candidate && (!next || candidate < next)) next = candidate;
     }
     result.set(employeeId, next);
@@ -100,14 +159,13 @@ export async function recomputeNextMaterialDate(
 ): Promise<void> {
   const [state, rules, dynamicGroups] = await Promise.all([
     buildEmployeeState(db, companyId, employeeId, asOf, asOf),
-    fetchActiveRules(db, companyId, asOf),
+    fetchSchedulableRules(db, companyId, asOf),
     getDynamicGroups(db, companyId),
   ]);
   const dynMap = new Map(dynamicGroups.map((g) => [g.key, g.criteria]));
   let next: Date | null = null;
-  for (const rule of rules) {
-    if (rule.source === 'manual' && rule.subjectEmployeeId !== employeeId) continue;
-    const candidate = nextMaterialDateForRule(rule.criteria, dynMap, state, asOf);
+  for (const entry of rules) {
+    const candidate = materialDateFor(entry, dynMap, state, employeeId, asOf);
     if (candidate && (!next || candidate < next)) next = candidate;
   }
   await upsertMaterialDates(db, companyId, new Map([[employeeId, next]]));

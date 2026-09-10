@@ -503,6 +503,22 @@ function expandOnce(p: Predicate, groups: Map<string, Predicate>): Predicate {
  * The scheduling entry point. Always call this rather than `nextMaterialDate` directly
  * on raw rule criteria, or thresholds reachable only through a dynamic group are missed.
  */
+/**
+ * Does this rule's outcome depend on the passage of time for anyone?
+ *
+ * Used to decide whether a rule write has to reschedule employees beyond the
+ * ones it currently matches. Expansion runs first, because a threshold can sit
+ * one level down inside a dynamic group and a rule that is only
+ * `in_group('two-year-club')` contains no tenure node of its own.
+ */
+export function mentionsTenure(criteria: Predicate, dynamicGroups: Map<string, Predicate>): boolean {
+  let found = false;
+  walk(expandDynamicGroups(criteria, dynamicGroups), (n) => {
+    if (n.op === 'gte_tenure') found = true;
+  });
+  return found;
+}
+
 export function nextMaterialDateForRule(
   criteria: Predicate,
   dynamicGroups: Map<string, Predicate>,

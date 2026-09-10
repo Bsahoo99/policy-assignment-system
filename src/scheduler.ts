@@ -142,8 +142,9 @@ export async function computeEmployeeMaterialDates(
  * A stored date at or before `now` is therefore work owed, not a stale value:
  * it stays until the dispatcher clears it. The trade is deliberate and one-sided
  * — keeping it can cost a reconcile that turns out to change nothing, which is
- * free because reconciliation is level-triggered and diffs before writing, while
- * dropping it loses an assignment permanently.
+ * reads and a resolve pass rather than nothing, but bounded and idempotent
+ * because reconciliation diffs before writing; dropping it loses an assignment
+ * permanently.
  */
 export async function upsertMaterialDates(
   db: Db,

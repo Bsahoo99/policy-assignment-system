@@ -423,8 +423,27 @@ An independent review reproduced these. They are listed with their reproductions
 rather than left to be discovered, because each one narrows a guarantee stated
 elsewhere in this document.
 
-Two of the original set are now fixed and are described here because the shape of
-each mistake is the point.
+Three of the original set are now fixed and are described here because the shape
+of each mistake is the point.
+
+**Manager propagation now cuts at the reporting-line boundary.** After a
+future-dated transfer, the old manager kept manager-only training indefinitely
+and the new one never gained it. Every source feeding boundary collection
+described something about the employee themselves — their facts, their rules,
+their memberships, their published assignments — and an employee's
+`direct_report_count` changes when *somebody else's* manager assignment starts or
+ends. That edge runs between employees, which is exactly why the slot DAG cannot
+express it: the DAG orders slots within one employee.
+
+The fix is one more boundary source: `manager`-slot assignments whose *target* is
+this employee. Their edges are the instants the count changes, so each manager's
+own plan now cuts there, and the cascade job's effective date stops mattering —
+which was the other half of the reported defect and needed no separate change.
+Notably this did **not** require the segmentation rework: the boundary was
+missing from the inputs, not mishandled by the planner.
+`test/manager-propagation.test.ts` asserts both managers immediately before and
+at the transfer, the same result when the change is processed months late, and
+the same result again on replay.
 
 **A new rule now schedules employees who do not match it yet.** Creating a
 two-year rule for a one-year employee used to write no
@@ -444,8 +463,9 @@ write landing while the dispatcher was behind moved a missed anniversary forward
 to the following year, and nothing ever brought it back. A stored date at or
 before now is work owed, not a stale value, and the upsert now keeps it until the
 dispatcher clears it. The trade is one-sided: keeping it can cost a reconcile that
-changes nothing, which is free because reconciliation diffs before writing, while
-dropping it loses an assignment permanently.
+changes nothing — reads and a resolve pass, not nothing, but bounded and
+idempotent because reconciliation diffs before writing — while dropping it loses
+an assignment permanently.
 
 The set is deliberately conservative and the cost is one pass over the company's
 employees per time-dependent rule write; rules that do not depend on time skip it
@@ -479,22 +499,6 @@ who to recompute.
   there. Termination is structural — each answer is strictly greater than
   `t_k` — and the existing `MAX_SEGMENTS_PER_RUN` cap and `continueAt`
   contract carry over unchanged, now applied to the full boundary stream.
-- **Manager cascades lose their effective dates.** Dependent managers are
-  enqueued at the originating job's effective date, and boundary collection
-  sees a manager's own assignments but not inbound reporting changes. After a
-  future-dated transfer the old manager keeps manager-only training and the new
-  one never gains it. A topological sort over slots cannot express a dependency
-  that runs between employees.
-
-  *Proposed fix.* Add inbound manager assignments to boundary collection: when
-  planning employee M's timeline, include the valid-range edges of every
-  `resolved_assignments` row in the `manager` slot whose *target* is M. M's plan
-  then cuts at exactly the instants their report count changes, and the cascade
-  job's effective date stops mattering. This is cheaper than threading segment
-  dates through the queue, and it composes with the iterative boundary discovery
-  above rather than duplicating it. The slot DAG stays as it is — it orders slots
-  within an employee; this is the cross-employee edge it was never meant to
-  carry.
 - **A partial record edit replaces the whole future timeline.** `PATCH` builds
   a full snapshot from the record in force at the effective date and supersedes
   everything after it, so patching location in April silently discards a
@@ -526,7 +530,7 @@ who to recompute.
   boundary that JavaScript builds at UTC midnight. The property test pins the
   session to UTC and so does not cover the discrepancy.
 
-The first three are the substantive ones. Together with the two fixed above,
+The first two are the substantive ones. Together with the three fixed above,
 they are instances of one mistake: deciding *which* employees and *which* time
 ranges are affected using information narrower than what the system already
 knows. The last four are narrower — a UI affordance, a provenance comparison, a

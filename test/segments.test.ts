@@ -150,7 +150,14 @@ describe('segmentize', () => {
 
 describe('boundary collection', () => {
   const range = (from: string, to: string | null) => ({ from: d(from), to: to ? d(to) : null });
-  const empty = { factRanges: [], ruleRanges: [], membershipRanges: [], publishedRanges: [], tenureThresholds: [] };
+  const empty = {
+    factRanges: [],
+    ruleRanges: [],
+    membershipRanges: [],
+    publishedRanges: [],
+    inboundReportRanges: [],
+    tenureThresholds: [],
+  };
 
   it('test_membership_end_date_is_collected_as_a_boundary', () => {
     // The finding: a revoked membership has a finite END. Collecting only starts meant
@@ -170,9 +177,11 @@ describe('boundary collection', () => {
       ruleRanges: [range('2022-01-01', '2023-01-01')],
       membershipRanges: [range('2024-01-01', '2025-01-01')],
       publishedRanges: [range('2026-01-01', '2027-01-01')],
+      inboundReportRanges: [range('2030-01-01', '2031-01-01')],
       tenureThresholds: [d('2028-01-01')],
     });
-    expect(b).toHaveLength(9);
+    // four two-edged sources, plus one tenure threshold
+    expect(b).toHaveLength(11);
   });
 });
 

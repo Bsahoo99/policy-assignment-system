@@ -168,7 +168,7 @@ async function fetchBoundarySources(
   // A range contributes a boundary if EITHER edge falls after `after`.
   // lower > after: the range starts later (a future-dated change).
   // upper > after: the range ends later (a revocation or expiry).
-  const [facts, rules, memberships, published] = await Promise.all([
+  const [facts, rules, memberships, published, inboundReports] = await Promise.all([
     db.query<{ f: unknown; t: unknown }>(
       `SELECT lower(valid) AS f, upper(valid) AS t FROM employment_records
        WHERE company_id = $1 AND employee_id = $2 AND upper_inf(system)
@@ -194,6 +194,20 @@ async function fetchBoundarySources(
          AND (lower(valid) > $3::timestamptz OR upper(valid) > $3::timestamptz)`,
       [companyId, employeeId, after],
     ),
+    // Inbound reporting lines: manager-slot assignments pointing AT this
+    // employee. Their edges are the instants this employee's direct_report_count
+    // changes, and they are invisible in every other source, all of which are
+    // scoped to rows about the employee themselves.
+    db.query<{ f: unknown; t: unknown }>(
+      `SELECT lower(ra.valid) AS f, upper(ra.valid) AS t
+         FROM resolved_assignments ra
+         JOIN assignment_slots s
+           ON s.id = ra.slot_id AND s.company_id = ra.company_id AND s.key = 'manager'
+         JOIN employee_targets et ON et.target_id = ra.target_id
+        WHERE ra.company_id = $1 AND et.employee_id = $2 AND upper_inf(ra.system)
+          AND (lower(ra.valid) > $3::timestamptz OR upper(ra.valid) > $3::timestamptz)`,
+      [companyId, employeeId, after],
+    ),
   ]);
   const ranges = (rows: { f: unknown; t: unknown }[]): Range[] =>
     rows.map((r) => ({ from: toDate(r.f), to: r.t === null ? null : toDate(r.t) }));
@@ -202,6 +216,7 @@ async function fetchBoundarySources(
     ruleRanges: ranges(rules.rows),
     membershipRanges: ranges(memberships.rows),
     publishedRanges: ranges(published.rows),
+    inboundReportRanges: ranges(inboundReports.rows),
   };
 }
 

@@ -41,6 +41,19 @@ export interface BoundarySources {
    * does not error, it silently swallows a later conclusion, which is worse.
    */
   publishedRanges: Range[];
+  /**
+   * Valid ranges of `manager`-slot assignments whose TARGET is this employee —
+   * their inbound reporting lines.
+   *
+   * Every other source here describes something about the employee themselves.
+   * This one is the only edge that runs between employees, and it is why a
+   * topological sort over slots cannot express the manager dependency: an
+   * employee's `direct_report_count` changes when somebody *else's* manager
+   * assignment starts or ends, and without these edges their timeline never cuts
+   * at that instant. The old manager keeps manager-only training for ever and
+   * the new one never gains it.
+   */
+  inboundReportRanges: Range[];
   /** Tenure thresholds after T, from nextMaterialDate over active rules. */
   tenureThresholds: Date[];
 }
@@ -48,7 +61,13 @@ export interface BoundarySources {
 /** Both edges of every range, plus the bare thresholds. Finite bounds only. */
 export function boundariesFrom(s: BoundarySources): Date[] {
   const out: Date[] = [...s.tenureThresholds];
-  for (const group of [s.factRanges, s.ruleRanges, s.membershipRanges, s.publishedRanges]) {
+  for (const group of [
+    s.factRanges,
+    s.ruleRanges,
+    s.membershipRanges,
+    s.publishedRanges,
+    s.inboundReportRanges,
+  ]) {
     for (const r of group) {
       out.push(r.from);
       if (r.to !== null) out.push(r.to);

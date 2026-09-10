@@ -420,34 +420,38 @@ who to recompute.
   rule change dirties whoever matches now; it must also schedule whoever could
   match later.
 
-  Deleting the tenure nodes and matching what remains is the obvious move and it
-  is wrong: under `or` it widens the predicate to everyone, and under `not` it
-  inverts which employees are affected. The question is not "who matches with the
-  clause removed" but "for whom can this predicate's value still change" — so ask
-  that directly. Compile the predicate twice, once with every `gte_tenure` node
-  forced `TRUE` and once forced `FALSE`, and take the employees for whom the two
-  disagree. That evaluates the whole tree, so `and`, `or` and `not` are handled by
-  construction rather than by case analysis:
+  The per-employee arithmetic is already correct and does not need replacing.
+  `nextMaterialDate` walks the predicate and returns the earliest tenure boundary
+  after a given instant, so a predicate with several thresholds — including the
+  `tenure >= 1 AND NOT tenure >= 2` case listed below — yields each boundary in
+  turn as time passes. Nothing about the algorithm is wrong; the defect is
+  entirely about which employees it is run over, which today is the candidate set
+  and therefore excludes exactly the employees who do not match yet.
 
-  | predicate | forced TRUE | forced FALSE | material? |
-  | --- | --- | --- | --- |
-  | `tenure>=2` | true | false | yes |
-  | `dept=Eng AND tenure>=2`, Eng | true | false | yes |
-  | `dept=Eng AND tenure>=2`, Sales | false | false | no |
-  | `dept=Eng OR tenure>=2`, Eng | true | true | no — already matches |
-  | `dept=Eng OR tenure>=2`, Sales | true | false | yes |
-  | `NOT tenure>=2` | false | true | yes — will *lose* it |
+  So the fix is to widen the set, not to invent a cleverer predicate. When a
+  created or edited rule contains a `gte_tenure` node — after
+  `expandDynamicGroups`, so thresholds inside dynamic groups count —
+  `recomputeNextMaterialDate` runs across the company's employees rather than
+  across the candidate set alone.
 
-  Several thresholds in one predicate yield a superset, which is the safe
-  direction: `nextMaterialDate` then computes the earliest instant that actually
-  matters. Both compilations are `toSql` against the same `employee_state` CTE,
-  so this is one extra query, bounded by the predicate rather than the company.
+  It is worth being explicit that this is a deliberately conservative set, and
+  why a narrower one was rejected. The tempting move is to match some sub-part of
+  the predicate with the tenure clauses stripped out. That is unsound: a
+  predicate's truth over time depends on the whole tree, so under `or` the
+  stripped predicate widens to everyone and under `not` it inverts, and for
+  `tenure >= 1 AND NOT tenure >= 2` forcing the thresholds to constants makes the
+  predicate false in both directions while the real answer is true between the
+  first and second anniversary — a false negative, which is the one error
+  scheduling cannot tolerate.
 
-  Two details this must not miss. Expansion runs first, so a threshold inside a
-  dynamic group counts. And the scan cannot be limited to rules in force now —
-  a rule whose valid range *starts* next quarter carries thresholds of its own,
-  so the schedule pass reads rules whose valid range intersects `[now, ∞)`, not
-  rules in force at the instant of the write.
+  The cost is one pass over the company's employees per rule change that
+  mentions tenure. Rules without a tenure node skip it entirely, and the pass
+  batches through `buildEmployeeStates` rather than looping queries, but it is a
+  population-scale operation on a write path and should be measured before it is
+  called cheap. If it proves too expensive, the sound narrowing is to evaluate
+  the full predicate at each of the employee's own candidate boundaries rather
+  than to simplify the predicate — same answer, more queries, no false negatives.
+
 - **Segmentation collects one tenure boundary per rule.** A predicate with both
   a lower and an upper tenure bound (`tenure >= 1 AND NOT tenure >= 2`)
   publishes an open-ended segment where it should close at the second

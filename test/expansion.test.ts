@@ -3,6 +3,7 @@ import {
   expandDynamicGroups,
   nextMaterialDateForRule,
   nextMaterialDate,
+  evaluate,
   type Predicate,
   type EmployeeState,
 } from '../src/predicate.js';
@@ -68,5 +69,48 @@ describe('dynamic group expansion', () => {
     };
     const next = nextMaterialDateForRule(rule, twoYearClub, jane, new Date('2025-01-01Z'));
     expect(next?.toISOString().slice(0, 10)).toBe('2026-03-15');
+  });
+});
+
+/**
+ * A predicate bounded on both sides changes value at each of its thresholds in
+ * turn. Pinned because a proposed scheduling design tried to decide materiality
+ * by forcing every threshold to a constant, which reports this predicate as
+ * false in both directions while the real answer is true between the first and
+ * second anniversary. A false negative here means an anniversary job is never
+ * scheduled, so the counterexample is worth keeping in the suite.
+ */
+describe('nextMaterialDate over multiple thresholds', () => {
+  const between1And2: Predicate = {
+    op: 'and',
+    children: [
+      { op: 'gte_tenure', years: 1 },
+      { op: 'not', child: { op: 'gte_tenure', years: 2 } },
+    ],
+  };
+  const hire2024 = {
+    employee_id: 'e',
+    department: 'Engineering',
+    location_state: 'CA',
+    location_country: 'US',
+    employment_type: 'w2_employee' as const,
+    pay_type: 'salary' as const,
+    tenure_start_date: '2024-01-01',
+    direct_report_count: 0,
+    group_keys: [] as string[],
+  };
+  const on = (iso: string) => new Date(`${iso}T00:00:00Z`);
+  const day = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+
+  it('test_next_material_date_returns_each_threshold_in_turn', () => {
+    expect(day(nextMaterialDate(between1And2, hire2024, on('2024-06-01')))).toBe('2025-01-01');
+    expect(day(nextMaterialDate(between1And2, hire2024, on('2025-06-01')))).toBe('2026-01-01');
+    expect(day(nextMaterialDate(between1And2, hire2024, on('2026-06-01')))).toBeNull();
+  });
+
+  it('test_predicate_bounded_on_both_sides_is_true_only_between_its_thresholds', () => {
+    expect(evaluate(between1And2, hire2024, on('2024-06-01')).matched).toBe(false);
+    expect(evaluate(between1And2, hire2024, on('2025-06-01')).matched).toBe(true);
+    expect(evaluate(between1And2, hire2024, on('2026-06-01')).matched).toBe(false);
   });
 });

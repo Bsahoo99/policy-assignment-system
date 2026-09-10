@@ -130,17 +130,40 @@ export async function computeEmployeeMaterialDates(
   return result;
 }
 
+/**
+ * Stores each employee's next material date, without discarding overdue work.
+ *
+ * Recomputing always answers "the next boundary after *now*", so if the stored
+ * date has already passed and the dispatcher has not got to it yet, overwriting
+ * moves the employee past a boundary nobody acted on. An unrelated rule write
+ * landing while the dispatcher is behind would silently skip someone's
+ * anniversary, and nothing would ever bring it back.
+ *
+ * A stored date at or before `now` is therefore work owed, not a stale value:
+ * it stays until the dispatcher clears it. The trade is deliberate and one-sided
+ * — keeping it can cost a reconcile that turns out to change nothing, which is
+ * free because reconciliation is level-triggered and diffs before writing, while
+ * dropping it loses an assignment permanently.
+ */
 export async function upsertMaterialDates(
   db: Db,
   companyId: string,
   materialDates: Map<string, Date | null>,
+  now: Date,
 ): Promise<void> {
   for (const [employeeId, nextDate] of materialDates) {
     await db.query(
       `INSERT INTO employee_next_material_date (company_id, employee_id, next_at, reason, computed_at)
        VALUES ($1, $2, $3, NULL, now())
-       ON CONFLICT (company_id, employee_id) DO UPDATE SET next_at = EXCLUDED.next_at, computed_at = now()`,
-      [companyId, employeeId, nextDate ? nextDate.toISOString() : null],
+       ON CONFLICT (company_id, employee_id) DO UPDATE
+          SET next_at = CASE
+                WHEN employee_next_material_date.next_at IS NOT NULL
+                 AND employee_next_material_date.next_at <= $4::timestamptz
+                THEN employee_next_material_date.next_at
+                ELSE EXCLUDED.next_at
+              END,
+              computed_at = now()`,
+      [companyId, employeeId, nextDate ? nextDate.toISOString() : null, now.toISOString()],
     );
   }
 }
@@ -168,7 +191,7 @@ export async function recomputeNextMaterialDate(
     const candidate = materialDateFor(entry, dynMap, state, employeeId, asOf);
     if (candidate && (!next || candidate < next)) next = candidate;
   }
-  await upsertMaterialDates(db, companyId, new Map([[employeeId, next]]));
+  await upsertMaterialDates(db, companyId, new Map([[employeeId, next]]), asOf);
 }
 
 /**

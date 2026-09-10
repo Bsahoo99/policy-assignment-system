@@ -257,7 +257,7 @@ export async function handleJob(
     const data = job.data as RecomputeMaterialDatesJob;
     await run(async (tx) => {
       const dates = await computeEmployeeMaterialDates(tx, data.company_id, clock.now());
-      await upsertMaterialDates(tx, data.company_id, dates);
+      await upsertMaterialDates(tx, data.company_id, dates, clock.now());
     });
     return;
   }

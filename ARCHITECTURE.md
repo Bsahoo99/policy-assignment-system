@@ -437,6 +437,16 @@ the company rather than across the candidate set. The scheduler also reads rules
 that are *going to be* in force, not only those in force now, and treats a rule's
 own activation instant as a boundary.
 
+Widening the pass created a second defect worth recording, because it is the
+same seam as everything else here. Recomputing always answers "the next boundary
+after *now*", and the upsert overwrote whatever was stored — so an unrelated rule
+write landing while the dispatcher was behind moved a missed anniversary forward
+to the following year, and nothing ever brought it back. A stored date at or
+before now is work owed, not a stale value, and the upsert now keeps it until the
+dispatcher clears it. The trade is one-sided: keeping it can cost a reconcile that
+changes nothing, which is free because reconciliation diffs before writing, while
+dropping it loses an assignment permanently.
+
 The set is deliberately conservative and the cost is one pass over the company's
 employees per time-dependent rule write; rules that do not depend on time skip it
 entirely, and the reads are batched. Narrowing it by simplifying the predicate is
@@ -444,7 +454,8 @@ unsound — see the note under segmentation below — so the honest options were
 conservative set with a stated cost, or a wrong one. `test/tenure-scheduling.test.ts`
 covers gaining eligibility, losing it, a threshold hidden inside a dynamic group,
 a rule that becomes effective later, and the anniversary actually producing the
-assignment; four of its five cases fail without the change.
+assignment, and that an unrelated write cannot advance a missed anniversary.
+Each case fails against the code it was written for.
 
 **Candidate selection used to conflate the two clocks.** `candidatesForRuleChange` took a single instant and
 used it as both the effective time and the system time, so a rule written today

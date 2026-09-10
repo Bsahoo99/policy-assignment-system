@@ -40,7 +40,7 @@ describe('scheduler', () => {
     await insertEmploymentRecord(db, companyId, employeeId, '2024-01-01');
 
     const map = new Map<string, Date | null>([[employeeId, new Date('2026-01-01T00:00:00Z')]]);
-    await upsertMaterialDates(db as unknown as Db, companyId, map);
+    await upsertMaterialDates(db as unknown as Db, companyId, map, new Date('2025-01-01T00:00:00Z'));
     const { rows } = await (db as unknown as Db).query<{ next_at: string }>(
       'SELECT next_at FROM employee_next_material_date WHERE company_id = $1 AND employee_id = $2',
       [companyId, employeeId],

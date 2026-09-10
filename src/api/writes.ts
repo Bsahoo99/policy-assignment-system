@@ -273,7 +273,12 @@ async function rescheduleForTimeDependentRule(
     mentionsTenure(criteria, dynMap) || effectiveAt.getTime() > systemAt.getTime();
   if (!timeDependent) return;
 
-  await upsertMaterialDates(tx, companyId, await computeEmployeeMaterialDates(tx, companyId, systemAt));
+  await upsertMaterialDates(
+    tx,
+    companyId,
+    await computeEmployeeMaterialDates(tx, companyId, systemAt),
+    systemAt,
+  );
 }
 
 export interface RulePatch {

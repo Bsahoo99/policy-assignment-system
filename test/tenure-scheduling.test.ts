@@ -209,3 +209,82 @@ describe('tenure scheduling for employees who do not match yet', () => {
     expect(row?.next_at).not.toBeNull();
   });
 });
+
+/**
+ * Rescheduling must never lose work that was already due.
+ *
+ * The company-wide pass added for the case above recomputes from *now*, and the
+ * upsert overwrote whatever was stored. So an unrelated rule write, landing while
+ * the dispatcher was behind, moved a missed anniversary forward to the next one
+ * and the employee silently never got the policy. A spurious reconcile is
+ * harmless — it is level-triggered and writes nothing when nothing changed. A
+ * dropped one is data loss.
+ */
+describe('rescheduling must not discard overdue work', () => {
+  it('test_an_unrelated_rule_write_does_not_advance_a_missed_anniversary', async () => {
+    const companyId = await insertCompany(db, 'overdue-1');
+    const employeeId = await insertEmployee(db, companyId, 'overdue@example.com');
+    await insertEmploymentRecord(db, companyId, employeeId, '2024-01-01', 'Sales');
+    const slotId = await insertSlot(db, companyId, 'vacation', 'exactly_one', 'policy');
+    const targetId = await insertAssignmentTarget(db, companyId, 'policy', 'Senior Vacation');
+    const otherSlot = await insertSlot(db, companyId, 'training', 'many', 'policy');
+    const otherTarget = await insertAssignmentTarget(db, companyId, 'policy', 'Eng Training');
+
+    const written = new Date('2025-01-01T00:00:00Z');
+    const queue = memoryQueue();
+    await createRule(
+      db,
+      companyId,
+      { name: 'Two years', slotId, targetId, criteria: { op: 'gte_tenure', years: 2 } },
+      written,
+      new FixedClock(written),
+      queue,
+    );
+    const before = await scheduleRow(companyId, employeeId);
+    expect(new Date(before!.next_at!).toISOString().slice(0, 10)).toBe('2026-01-01');
+
+    // The dispatcher is behind. Meanwhile someone writes an unrelated rule that
+    // cannot apply to this employee at all.
+    const late = new Date('2026-02-01T00:00:00Z');
+    await createRule(
+      db,
+      companyId,
+      {
+        name: 'Engineering three years',
+        slotId: otherSlot,
+        targetId: otherTarget,
+        criteria: {
+          op: 'and',
+          children: [
+            { op: 'eq', field: 'department', value: 'Engineering' },
+            { op: 'gte_tenure', years: 3 },
+          ],
+        },
+      },
+      late,
+      new FixedClock(late),
+      queue,
+    );
+
+    const after = await scheduleRow(companyId, employeeId);
+    expect(
+      new Date(after!.next_at!).toISOString().slice(0, 10),
+      'the missed anniversary must survive an unrelated write',
+    ).toBe('2026-01-01');
+
+    // And it must still fire, stamping the anniversary rather than the run time.
+    const lateClock = new FixedClock(late);
+    await dispatchDueMaterialDates(db, companyId, late, queue);
+    await drainMemoryQueue(db, lateClock, queue);
+
+    expect(await assignedTargets(companyId, employeeId, '2026-06-01T00:00:00Z')).toContain(
+      'Senior Vacation',
+    );
+    const { rows } = await db.query<{ f: string }>(
+      `SELECT lower(valid) AS f FROM resolved_assignments
+        WHERE company_id = $1 AND employee_id = $2 AND upper_inf(system)`,
+      [companyId, employeeId],
+    );
+    expect(new Date(rows[0].f).toISOString().slice(0, 10)).toBe('2026-01-01');
+  });
+});

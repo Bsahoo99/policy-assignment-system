@@ -12,13 +12,22 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
+/*
+ * This app is deliberately light-only: `layout.tsx` sets `bg-white text-gray-900`
+ * and every screen is built from light utilities (`bg-gray-50` headers,
+ * `border-gray-200`, `text-gray-500`).
+ *
+ * The create-next-app boilerplate that used to sit here also declared a dark
+ * palette under `prefers-color-scheme: dark`. That produced one half of a dark
+ * mode: this `body` rule is unlayered, and unlayered declarations outrank
+ * anything in Tailwind's `utilities` layer, so `--foreground: #ededed` beat
+ * `text-gray-900` and every screen inherited light text — while element
+ * backgrounds like the audit table's `bg-gray-50` header stayed light. Light on
+ * light, unreadable, and only for readers whose OS is set to dark.
+ *
+ * Building a real dark mode means a second palette for every component. Removing
+ * the half that was never finished is the honest fix for the scope this is in.
+ */
 body {
   background: var(--background);
   color: var(--foreground);

@@ -20,11 +20,37 @@ let boss: PgBoss | null = null;
 let queue: Queue | null = null;
 let clock: Clock | null = null;
 
+/**
+ * A Db bound to one connection, with queries serialised.
+ *
+ * The engine issues independent reads together — `Promise.all` in `reconcile`,
+ * `candidates`, `state`, `scheduler` and others. Against a Pool that is correct
+ * and fast: each query takes its own connection. Against a single client bound
+ * by `withTransaction` it is neither, because a Postgres connection cannot
+ * multiplex. `pg` currently tolerates it with a deprecation warning and will
+ * throw in pg 9.
+ *
+ * PGlite hid this: it serialises internally, so the whole suite passes while the
+ * documented Postgres topology warns on every reconcile. Serialising here fixes
+ * every call site at once, and keeps `Promise.all` meaning "these do not depend
+ * on each other" rather than becoming a claim about connections.
+ */
 function poolClientDb(client: PoolClient): Db {
+  let chain: Promise<unknown> = Promise.resolve();
+  const serial = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = chain.then(run, run);
+    // Keep the chain alive after a rejection; the caller still sees the error.
+    chain = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
+
   return {
     query: <T = Record<string, unknown>>(text: string, params?: unknown[]) =>
-      client.query(text, params as never[]) as unknown as Promise<{ rows: T[] }>,
-    exec: (sql: string) => client.query(sql),
+      serial(() => client.query(text, params as never[])) as unknown as Promise<{ rows: T[] }>,
+    exec: (sql: string) => serial(() => client.query(sql)),
   };
 }
 

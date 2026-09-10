@@ -366,6 +366,14 @@ Stated plainly rather than discovered:
 - **Performance at scale is unverified.** The suite exercises the seeded
   population (3 employees); `buildEmployeeStates` is batched and candidate
   selection uses compiled SQL, but no population-scale benchmark exists.
+- **Real Postgres, the Docker entrypoint and the pg-boss worker are now
+  exercised end to end**, on `postgres:16`. The entrypoint applied the schema and
+  all six migrations and recorded each in `schema_migrations`; seeding reconciled
+  three employees; a rule created through `createRule` enqueued transactionally,
+  the worker completed it, and the resulting assignment carried the rule's
+  effective date (2026-10-01) rather than the instant the worker ran. Running it
+  also surfaced a defect PGlite had hidden — see the connection note below. What
+  remains unmeasured is scale and concurrency, not whether the topology works.
 - **Databases from before the migration ledger cannot be upgraded, only
   recreated.** `ensureSchema` brings a database forward by comparing
   `schema_migrations` to the migrations directory, applying the difference
@@ -381,12 +389,13 @@ Stated plainly rather than discovered:
   ledger row. Verifying that two processes actually serialise needs real
   Postgres, which this environment has no daemon for; PGlite is single-process
   and cannot demonstrate it.
-- **The Docker path was broken by migration 006 and is fixed but still not
-  run here.** The entrypoint was a static list of `\i` lines; adding 006 without
-  updating it meant the documented Postgres setup built a schema whose first rule
-  write failed with 42703. It now iterates the migrations directory, and a test
-  asserts no entrypoint file names an individual migration. The fix is verified by
-  schema sequence, not by a live container — see below.
+- **A single bound connection cannot run the engine's parallel reads.** The
+  engine issues independent reads with `Promise.all`, which is correct against a
+  Pool and wrong against the one client `withTransaction` binds, because a
+  Postgres connection cannot multiplex. PGlite serialises internally and hid it
+  completely; the first real-Postgres run warned on every reconcile. The pool
+  client adapter now serialises, so `Promise.all` keeps meaning "these do not
+  depend on each other" rather than becoming a claim about connections.
 - **Real Postgres/worker integration is exercised by code path, not by a
   running deployment** — the pg-boss worker and `withTransaction` adapters are
   written and unit-tested against PGlite, but this environment had no Docker
@@ -434,6 +443,11 @@ who to recompute.
   `recomputeNextMaterialDate` runs across the company's employees rather than
   across the candidate set alone.
 
+  What is verified and what is not: tests pin the predicate's value over time and
+  `nextMaterialDate`'s threshold arithmetic, including the two-sided case below.
+  They do not exercise the company-wide scheduling pass, which is a design here
+  and not yet an implementation.
+
   It is worth being explicit that this is a deliberately conservative set, and
   why a narrower one was rejected. The tempting move is to match some sub-part of
   the predicate with the tenure clauses stripped out. That is unsound: a
@@ -443,6 +457,17 @@ who to recompute.
   predicate false in both directions while the real answer is true between the
   first and second anniversary — a false negative, which is the one error
   scheduling cannot tolerate.
+
+  Two requirements this must not lose. Expansion runs first, so a threshold
+  inside a dynamic group counts. And the pass cannot read only the rules in force
+  at the instant of the write: a rule whose valid range *starts* next quarter
+  carries thresholds of its own, and running today's scheduler over the whole
+  population still finds nothing for it. The scan therefore covers rules visible
+  at the chosen system time whose valid ranges intersect the future planning
+  interval — and a rule's own activation instant is itself a material date, so
+  those boundaries belong in `employee_next_material_date` alongside tenure
+  anniversaries. `nextMaterialDate` knows only about tenure today; rule
+  activation is the second source it needs.
 
   The cost is one pass over the company's employees per rule change that
   mentions tenure. Rules without a tenure node skip it entirely, and the pass
